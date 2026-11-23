@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   type DiaryDay,
+  type DiaryEntry,
   GRAM_UNIT,
   KtClient,
   MAX_RANGE_DAYS,
@@ -17,6 +18,7 @@ import {
   type MealId,
   todayCzech,
 } from '../kt/client.js';
+import { RANKABLE_NUTRIENTS, rankNutrient } from '../kt/ranking.js';
 
 const MEAL_IDS = Object.keys(MEALS) as [MealId, ...MealId[]];
 
@@ -290,6 +292,7 @@ export function registerTools(server: McpServer, kt: KtClient): void {
         'Read every food and recipe actually logged on one day, grouped by meal, each with its name, the logged quantity and its nutrients. Read-only. ' +
         'Use this instead of get_day_summary whenever the question is about WHICH foods were eaten ("what gave me the most protein", "what did I have for dinner"); get_day_summary only has totals and goals. ' +
         'Nutrient values are for the logged quantity, not per 100 g. A null value means the site has no figure for it — it is not zero. ' +
+        'Each entry has an entry_id, which update_diary_entry and delete_diary_entry need. The day\'s exercise (activities) and free-text notes (day_notes) come along too. ' +
         'Empty meals are left out. For several days use get_diary_range.',
       inputSchema: {
         date: z.string().optional().describe(dateDescription),
@@ -297,7 +300,7 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     guard('get_day_entries', async ({ date }) => {
-      return json({ ...presentDay(await kt.getDayEntries(date)), notes: ENTRY_NOTES });
+      return json({ ...presentDay(await kt.getDayEntries(date)), reading_guide: ENTRY_NOTES });
     }),
   );
 
@@ -308,7 +311,7 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       description:
         `Read the individual logged entries for every day from \`from\` to \`to\`, both included, at most ${MAX_RANGE_DAYS} days. Read-only. ` +
         'Same per-entry detail as get_day_entries; use it for week-level questions such as "which foods gave me the most protein this week". ' +
-        'Each day has a status: "filled" (has entries), "empty" (the site returned no entries — that cannot tell "ate nothing" from "did not log" or a future date) or "error" (that day failed to load; the rest are still returned). ' +
+        'Each day has a status: "filled" (has food entries), "empty" (the site returned no food entries — that cannot tell "ate nothing" from "did not log" or a future date; activities and notes may still be present) or "error" (that day failed to load; the rest are still returned). ' +
         'If the login fails the whole call fails. Nutrient values are for the logged quantity; null means unknown, not zero.',
       inputSchema: {
         from: z.string().describe('First day, dd.MM.yyyy.'),
@@ -328,7 +331,114 @@ export function registerTools(server: McpServer, kt: KtClient): void {
             ? { date: o.date, status: o.status, error: o.error }
             : { status: o.status, ...presentDay(o.day) },
         ),
-        notes: ENTRY_NOTES,
+        reading_guide: ENTRY_NOTES,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'get_nutrient_ranking',
+    {
+      title: 'Rank foods by a nutrient over a date range',
+      description:
+        'Which foods supplied the most protein (or energy, carbohydrate, fat, fibre, sugar, saturated fat, salt) over a range of days, summed per food. Read-only. ' +
+        'Use this for questions like "what gave me the most protein this week" — the sums are done exactly, which beats adding up get_diary_range lines yourself. ' +
+        `Same range rules as get_diary_range (both end days included, at most ${MAX_RANGE_DAYS} days). ` +
+        'Foods are matched by exact name. A food whose value is unknown on every line is listed under "unknown", never counted as 0; if some lines are unknown its total is a minimum (unknown_lines > 0). ' +
+        'Days that failed to load are listed in failed_dates, so the ranking may be incomplete. A login failure fails the whole call.',
+      inputSchema: {
+        from: z.string().describe('First day, dd.MM.yyyy.'),
+        to: z.string().describe(`Last day, dd.MM.yyyy. At most ${MAX_RANGE_DAYS} days from "from", both included.`),
+        nutrient: z.enum(RANKABLE_NUTRIENTS).describe('Which value to add up. "energy" is in the diary\'s energy unit (kcal), the rest in grams.'),
+        limit: z.number().int().min(1).max(50).optional().describe('How many top foods to return. Defaults to 10.'),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_nutrient_ranking', async ({ from, to, nutrient, limit }) => {
+      const r = rankNutrient(await kt.getDiaryRange(from, to), nutrient, limit ?? 10);
+      return json({
+        from,
+        to,
+        nutrient: r.nutrient,
+        unit: r.unit,
+        grand_total: r.grandTotal,
+        ranking: r.ranking.map(f => ({
+          title: f.title,
+          kind: f.kind,
+          total: f.total,
+          lines: f.lines,
+          unknown_lines: f.unknownLines,
+          days_eaten: f.days,
+          quantity_total: f.quantityTotal,
+          quantity_unit: f.quantityUnit,
+        })),
+        omitted_foods: r.omittedFoods,
+        unknown: r.unknown.map(u => ({ title: u.title, kind: u.kind, lines: u.lines })),
+        days: r.counts,
+        failed_dates: r.failedDates,
+        reading_guide:
+          'total is summed over the logged quantities (not per 100 g). grand_total covers every food with a known value, including those cut by limit. ' +
+          'quantity_total covers the same lines as total (lines with an unknown value are left out of both); it is null when any of those lines had no readable quantity or the units differ. grand_total is null when no value was known at all.',
+      });
+    }),
+  );
+
+  server.registerTool(
+    'update_diary_entry',
+    {
+      title: 'Change the quantity of a logged entry',
+      description:
+        'Change how much of a food was logged in an existing diary entry. This edits the user\'s real diary, so confirm the entry and the new amount first. ' +
+        'Get the entry_id (and the date it belongs to) from get_day_entries — it is NOT the food_id used by log_food. ' +
+        '`amount` counts units, as in log_food: with no unit_id the entry keeps its current unit, so 20 on a gram entry means 20 g, but 2 on a "kus (55 g)" entry means 2 pieces. ' +
+        'Entries logged from a saved recipe cannot be changed by the site; delete and re-log those. Returns the entry before and after.',
+      inputSchema: {
+        date: z.string().describe('The day the entry is on, dd.MM.yyyy.'),
+        entry_id: z.string().min(1).describe('entry_id from get_day_entries.'),
+        amount: z.number().positive().describe('New number of units.'),
+        unit_id: z.string().optional().describe('Optional unit id from get_food_portions. Omit to keep the entry\'s current unit.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    guard('update_diary_entry', async ({ date, entry_id, amount, unit_id }) => {
+      const change = await kt.updateDiaryEntry({ date, entryId: entry_id, amount, unitId: unit_id });
+      return json({
+        updated: true,
+        date: change.date,
+        meal: change.meal,
+        before: presentEntry(change.before),
+        after: change.after ? presentEntry(change.after) : null,
+        note: change.after ? undefined : 'The change was accepted but the entry could not be re-read; check it with get_day_entries.',
+      });
+    }),
+  );
+
+  server.registerTool(
+    'delete_diary_entry',
+    {
+      title: 'Delete a logged entry',
+      description:
+        'Permanently remove one entry from the user\'s diary. This cannot be undone, so confirm which entry they mean before calling it. ' +
+        'Get the entry_id (and its date) from get_day_entries. Removes a single entry per call; saved recipes themselves are untouched (that is delete_meal). ' +
+        'Returns what was removed and whether the day shows it gone.',
+      inputSchema: {
+        date: z.string().describe('The day the entry is on, dd.MM.yyyy.'),
+        entry_id: z.string().min(1).describe('entry_id from get_day_entries.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    guard('delete_diary_entry', async ({ date, entry_id }) => {
+      const result = await kt.deleteDiaryEntry({ date, entryId: entry_id });
+      return json({
+        deleted: true,
+        date: result.date,
+        meal: result.meal,
+        entry: presentEntry(result.deleted),
+        confirmed_gone: result.confirmed,
+        note:
+          result.confirmed === true
+            ? undefined
+            : 'The site accepted the deletion but the day could not be confirmed afterwards; check it with get_day_entries before trying again.',
       });
     }),
   );
@@ -336,13 +446,50 @@ export function registerTools(server: McpServer, kt: KtClient): void {
 
 const ENTRY_NOTES =
   'quantity.raw is the site\'s own text and is always correct; count/label/unit_size/total are parsed from it and are null when it could not be read (some lines have no quantity at all). ' +
-  'Nutrients are grams for the logged quantity; energy is in energy_unit. Lines with kind "recipe" were logged from a saved recipe.';
+  'Nutrients are grams for the logged quantity; energy is in energy_unit. Lines with kind "recipe" were logged from a saved recipe. ' +
+  'Activities from different sources (e.g. a phone and a watch) can overlap, so their energy is not guaranteed to add up. activities / day_notes are null when the site gave no readable list.';
+
+function presentEntry(e: DiaryEntry) {
+  return {
+    entry_id: e.id,
+    title: e.title,
+    kind: e.kind,
+    quantity: {
+      raw: e.quantity.raw,
+      count: e.quantity.count,
+      label: e.quantity.label,
+      unit_size: e.quantity.unitSize,
+      unit_size_unit: e.quantity.unitSizeUnit,
+      total: e.quantity.total,
+      total_unit: e.quantity.totalUnit,
+    },
+    energy: e.energy,
+    energy_unit: e.energyUnit,
+    nutrients: {
+      protein: e.nutrients.protein,
+      carbohydrate: e.nutrients.carbohydrate,
+      fat: e.nutrients.fat,
+      fibre: e.nutrients.fibre,
+      sugar: e.nutrients.sugar,
+      saturated_fat: e.nutrients.saturatedFat,
+      salt: e.nutrients.salt,
+    },
+  };
+}
 
 function presentDay(day: DiaryDay) {
   return {
     date: day.date,
     entry_count: day.entryCount,
     energy_unit: day.energyUnit,
+    activities: day.activities?.map(a => ({
+      title: a.title,
+      duration_minutes: a.durationMinutes,
+      steps: a.steps,
+      energy: a.energy,
+      energy_unit: a.energyUnit,
+    })) ?? null,
+    day_notes: day.notes?.map(n => ({ text: n.text, created: n.created })) ?? null,
     // Empty slots add nothing but length, which matters over a 14-day range.
     meals: day.meals
       .filter(meal => meal.entries.length > 0)
@@ -350,30 +497,7 @@ function presentDay(day: DiaryDay) {
         meal_id: meal.id,
         meal: meal.title,
         energy_total: meal.energyTotal,
-        entries: meal.entries.map(e => ({
-          title: e.title,
-          kind: e.kind,
-          quantity: {
-            raw: e.quantity.raw,
-            count: e.quantity.count,
-            label: e.quantity.label,
-            unit_size: e.quantity.unitSize,
-            unit_size_unit: e.quantity.unitSizeUnit,
-            total: e.quantity.total,
-            total_unit: e.quantity.totalUnit,
-          },
-          energy: e.energy,
-          energy_unit: e.energyUnit,
-          nutrients: {
-            protein: e.nutrients.protein,
-            carbohydrate: e.nutrients.carbohydrate,
-            fat: e.nutrients.fat,
-            fibre: e.nutrients.fibre,
-            sugar: e.nutrients.sugar,
-            saturated_fat: e.nutrients.saturatedFat,
-            salt: e.nutrients.salt,
-          },
-        })),
+        entries: meal.entries.map(presentEntry),
       })),
   };
 }

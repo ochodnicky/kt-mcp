@@ -138,12 +138,59 @@ export interface DiaryMeal {
   entries: DiaryEntry[];
 }
 
+/** An exercise line (walk, workout, step count). Energy is what the site credits as burned. */
+export interface DiaryActivity {
+  id: string;
+  title: string;
+  /** Parsed from "155 min"; null when the site gives no duration (step-count lines). */
+  durationMinutes: number | null;
+  steps: number | null;
+  energy: number | null;
+  energyUnit: string;
+}
+
+/** A free-text note on the day. Only these fields are read — the site embeds the whole user record in each note. */
+export interface DiaryNote {
+  id: string;
+  text: string;
+  /** ISO-8601 instant the note was written. */
+  created: string | null;
+}
+
 export interface DiaryDay {
   /** dd.MM.yyyy, as requested (and confirmed by the site's own date field). */
   date: string;
   energyUnit: string;
   meals: DiaryMeal[];
+  /** Number of food/recipe lines only; activities and notes do not count. */
   entryCount: number;
+  /** null (not []) when the response had no readable activity list. */
+  activities: DiaryActivity[] | null;
+  /** null (not []) when the response had no readable note list. */
+  notes: DiaryNote[] | null;
+}
+
+export interface EntryDeletion {
+  date: string;
+  meal: string;
+  /** The line as it was before deletion. */
+  deleted: DiaryEntry;
+  /** true = re-read shows it gone, false = still listed, null = could not re-read. */
+  confirmed: boolean | null;
+}
+
+export interface EntryChange {
+  date: string;
+  meal: string;
+  before: DiaryEntry;
+  /** null when the line could not be re-read after the change. */
+  after: DiaryEntry | null;
+}
+
+/** Diary-line ids end up in a URL path, so accept nothing but plain alphanumerics. */
+export function assertEntryId(id: string): string {
+  if (!/^[A-Za-z0-9]{8,64}$/.test(id)) throw new Error(`Invalid entry id "${id}" — use an entry_id from get_day_entries`);
+  return id;
 }
 
 export type DayOutcome =
@@ -361,6 +408,46 @@ function parseDiaryEntry(raw: unknown, dayEnergyUnit: string, where: string): Di
   };
 }
 
+/** All-or-nothing: one unreadable activity makes the whole list "unknown" rather than silently partial. */
+function parseActivities(raw: unknown, dayEnergyUnit: string): DiaryActivity[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: DiaryActivity[] = [];
+  for (const a of raw as unknown[]) {
+    if (!isRecord(a) || typeof a['title'] !== 'string') return null;
+    const minutes = typeof a['unit'] === 'string' ? /^(\d[\d ]*(?:,\d+)?) min$/.exec(a['unit'].replace(/[  ]/g, ' ').trim()) : null;
+    out.push({
+      id: String(a['id'] ?? ''),
+      title: a['title'],
+      durationMinutes: minutes ? parseCzechNumber(minutes[1]) : null,
+      steps: parseCzechNumber(a['steps']),
+      energy: parseCzechNumber(a['energy']),
+      energyUnit: typeof a['energyUnit'] === 'string' ? a['energyUnit'] : dayEnergyUnit,
+    });
+  }
+  return out;
+}
+
+/** ISO string for an epoch-ms value, or null when it is not a valid date (toISOString would throw). */
+function isoOrNull(epoch: number): string | null {
+  const d = new Date(epoch);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function parseNotes(raw: unknown): DiaryNote[] | null {
+  if (!Array.isArray(raw)) return null;
+  const out: DiaryNote[] = [];
+  for (const n of raw as unknown[]) {
+    if (!isRecord(n) || typeof n['text'] !== 'string') return null;
+    const created = n['created'];
+    out.push({
+      id: String(n['id'] ?? ''),
+      text: n['text'],
+      created: typeof created === 'number' ? isoOrNull(created) : null,
+    });
+  }
+  return out;
+}
+
 /**
  * Turns the payload of `/user/diary/{date}/get` into typed entries. Anything
  * structurally unexpected throws — an unrecognised response must never look
@@ -374,7 +461,7 @@ export function parseDiaryDay(data: unknown, requestedDate: string): DiaryDay {
 
   // The site answers for whatever day it parsed, so confirm it is the one asked for.
   const epoch = data['date'];
-  if (typeof epoch !== 'number' || !Number.isFinite(epoch)) throw new KtError(`${where}: response has no date`);
+  if (typeof epoch !== 'number' || Number.isNaN(new Date(epoch).getTime())) throw new KtError(`${where}: response has no valid date`);
   const answered = pragueDate(new Date(epoch));
   if (answered !== requestedDate) throw new KtError(`${where}: the site answered for ${answered}`);
 
@@ -396,7 +483,14 @@ export function parseDiaryDay(data: unknown, requestedDate: string): DiaryDay {
   if (typeof declared === 'number' && declared !== entryCount) {
     throw new KtError(`${where}: site reports ${declared} entries but ${entryCount} were present`);
   }
-  return { date: requestedDate, energyUnit, meals, entryCount };
+  return {
+    date: requestedDate,
+    energyUnit,
+    meals,
+    entryCount,
+    activities: parseActivities(data['activities'], energyUnit),
+    notes: parseNotes(data['notes']),
+  };
 }
 
 export interface KtCredentials {
@@ -597,6 +691,10 @@ export class KtClient {
     meal: MealId;
     date?: string;
   }): Promise<void> {
+    // Checked before anything is fetched or written: the site would silently
+    // file 31.02. under 03.03. instead of refusing it.
+    const date = args.date === undefined ? todayCzech() : assertCalendarDate(args.date);
+
     // Fetch the form with a session established, exactly as the site's own
     // frontend does: it carries user-specific fields (favourite, preferred
     // unit) that we must post back unchanged.
@@ -612,14 +710,14 @@ export class KtClient {
     payload['multiplier'] = args.amount;
     payload['unitGuid'] = args.unitId ?? form['unitGuid'] ?? GRAM_UNIT;
     payload['diaryTimeGuid'] = args.meal;
-    payload['date'] = args.date === undefined ? todayCzech() : assertCzechDate(args.date);
+    payload['date'] = date;
 
     await this.authed('/user/foodstuff/add?format=json&=', { method: 'POST', body: payload });
   }
 
   /** Raw daily summary. Shape is not fully documented, so it is passed through. */
   async getDaySummary(date?: string): Promise<unknown> {
-    return this.authed(`/statistic/summary/${date === undefined ? todayCzech() : assertCzechDate(date)}/get?format=json`);
+    return this.authed(`/statistic/summary/${date === undefined ? todayCzech() : assertCalendarDate(date)}/get?format=json`);
   }
 
   /**
@@ -652,6 +750,90 @@ export class KtClient {
       }
     }
     return outcomes;
+  }
+
+  // ---------------------------------------------------------------------
+  // Changing existing diary lines
+  // ---------------------------------------------------------------------
+
+  /** Finds one line on a day by its diary-line id. Throws when it is not there, so nothing is ever changed blind. */
+  private async findEntry(date: string, entryId: string): Promise<{ meal: DiaryMeal; entry: DiaryEntry }> {
+    const day = await this.getDayEntries(date);
+    for (const meal of day.meals) {
+      const entry = meal.entries.find(e => e.id === entryId);
+      if (entry) return { meal, entry };
+    }
+    throw new KtError(`No diary entry with id ${entryId} on ${date}. Ids come from get_day_entries and belong to one day.`);
+  }
+
+  /**
+   * Deletes one food or recipe line from a day. The line is looked up first
+   * and the day re-read afterwards, so the caller learns what was removed and
+   * whether it is really gone. The site deletes through a plain GET, taking
+   * one or more comma-separated ids; only ever one is sent here.
+   */
+  async deleteDiaryEntry(args: { date: string; entryId: string }): Promise<EntryDeletion> {
+    const date = assertCalendarDate(args.date);
+    const id = assertEntryId(args.entryId);
+    const { meal, entry } = await this.findEntry(date, id);
+
+    const isGone = (day: DiaryDay) => !day.meals.some(m => m.entries.some(e => e.id === id));
+    try {
+      await this.authed(`/user/diary/foodstuff/delete/${id}?format=json`);
+    } catch (error) {
+      if (error instanceof KtAuthError) throw error;
+      // The reply could not be read, but the delete may still have gone through.
+      // Report failure only if the line is demonstrably still there; otherwise
+      // the caller would retry and be told "no such entry".
+      const gone = await this.getDayEntries(date).then(isGone, () => false);
+      if (!gone) throw error;
+    }
+
+    // The delete has landed; a failed read-back must not become an error, or a retry would hit "no such entry".
+    const confirmed = await this.getDayEntries(date).then(isGone, () => null);
+    return { date, meal: meal.title, deleted: entry, confirmed };
+  }
+
+  /**
+   * Changes the logged quantity of one food line. Works the way the site's own
+   * edit dialog does: fetch that line's unit form, change `multiplier` (and
+   * optionally the unit) and post the form back whole. Saved-recipe lines have
+   * no such form — the site cannot change their amount — so they are refused.
+   */
+  async updateDiaryEntry(args: { date: string; entryId: string; amount: number; unitId?: string }): Promise<EntryChange> {
+    const date = assertCalendarDate(args.date);
+    const id = assertEntryId(args.entryId);
+    if (!Number.isFinite(args.amount) || args.amount <= 0) throw new KtError('amount must be a positive number');
+
+    const { meal, entry } = await this.findEntry(date, id);
+    if (entry.kind === 'recipe') {
+      throw new KtError(`"${entry.title}" was logged from a saved recipe, and the site cannot change the amount of such a line. Delete it and log it again instead.`);
+    }
+
+    const form = await this.authed(`/user/diary/foodstuff/unit/form/${id}?format=json`);
+    if (!isRecord(form) || form['diaryGuid'] !== id || typeof form['unitGuid'] !== 'string' || !Array.isArray(form['unitOptions'])) {
+      throw new KtError(`"${entry.title}": the site offers no way to change this line's quantity`);
+    }
+    const options = (form['unitOptions'] as unknown[]).filter(isRecord);
+    const unitId = args.unitId ?? form['unitGuid'];
+    if (!options.some(o => o['id'] === unitId)) {
+      throw new KtError(
+        `Unit ${unitId} is not valid for "${entry.title}". Available: ` +
+          options.map(o => `${String(o['title'])} (${String(o['id'])})`).join(', '),
+      );
+    }
+
+    await this.authed('/user/diary/foodstuff/unit/edit?format=json&=', {
+      method: 'POST',
+      body: { ...form, multiplier: args.amount, unitGuid: unitId },
+    });
+
+    // As with delete: the write has landed, so the read-back is best-effort.
+    const after = await this.findEntry(date, id).then(
+      found => found.entry,
+      () => null,
+    );
+    return { date, meal: meal.title, before: entry, after };
   }
 
   // ---------------------------------------------------------------------
@@ -755,6 +937,7 @@ export class KtClient {
    * individually when they ate part of one.
    */
   async logMeal(args: { mealId: string; meal: MealId; date?: string }): Promise<void> {
+    const date = args.date === undefined ? todayCzech() : assertCalendarDate(args.date);
     const form = (await this.authed(
       `/user/meal/add/form/${encodeURIComponent(args.mealId)}?format=json`,
     )) as Record<string, unknown>;
@@ -762,7 +945,7 @@ export class KtClient {
     // As in logFood: post the form back whole, as the site's frontend does.
     const payload: Record<string, unknown> = { ...form };
     payload['diaryTimeGuid'] = args.meal;
-    payload['date'] = args.date === undefined ? todayCzech() : assertCzechDate(args.date);
+    payload['date'] = date;
     payload['selectedUnitGuid'] = PORTION_UNIT;
     payload['count'] = 1;
 

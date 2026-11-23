@@ -48,6 +48,9 @@ Jakmile je agent připojený, přestane být zapisování jídel otravným prokl
 | `get_day_summary` | Přečte denní součty. |
 | `get_day_entries` | Přečte jednotlivé zapsané položky jednoho dne (potraviny i uložené recepty), seskupené podle jídla: název, zapsané množství a nutriční hodnoty. Pouze čtení. |
 | `get_diary_range` | Totéž pro rozsah dnů `from`–`to` (obě krajní data včetně, nejvýš 14 dní). U každého dne uvede, zda je vyplněný, prázdný, nebo se nepodařilo načíst. Pouze čtení. |
+| `get_nutrient_ranking` | Seřadí potraviny podle součtu zvoleného nutrientu (bílkoviny, energie, tuky…) za rozsah dnů. Součty počítá server, neznámé hodnoty nepočítá jako nuly. Pouze čtení. |
+| `update_diary_entry` | Změní zapsané množství jedné položky deníku (`entry_id` z `get_day_entries`). Položky z uloženého receptu web upravit neumí. |
+| `delete_diary_entry` | Smaže jednu položku deníku (`entry_id` z `get_day_entries`) a po smazání ověří, že je pryč. |
 | `create_meal` | Uloží recept složený z existujících potravin. |
 | `list_my_meals` | Vypíše uložené recepty s jejich id a celkovou energií. |
 | `log_meal` | Zaloguje celý uložený recept jako jeden záznam. |
@@ -241,7 +244,9 @@ jméno klienta zobrazené ve formuláři.
 - **Osobní použití.** Automatizace zápisů do vlastního účtu je mnohem měkčí pozice než hromadný scraping, ale pořád je mimo cokoli, co Dine4Fit posvětil. Držte frekvenci požadavků na lidské úrovni a nestavte na tom konkurenčního klienta.
 - **`get_day_summary` jednotlivé položky neobsahuje.** Vrací jen denní součty, cíle, hodnoty z profilu a týdenní grafy, a posílá odpověď webu beze změny dál, protože její tvar není plně zdokumentovaný. Položky čtou `get_day_entries` a `get_diary_range` z endpointu `/user/diary/{dd.MM.yyyy}/get`, který používá i deník na webu.
 - **Čtení položek dne vychází z pozorování, ne z dokumentace.** Tvar odpovědi byl odvozen z jednoho účtu za 30 dní a klient při jakékoli odchylce hlásí chybu. Web posílá množství jen jako zobrazený text (`3 x kus (19 g)`); `quantity.raw` je vždy tento text a z něj odvozená čísla jsou `null`, když se text nepodařilo přečíst (některé záznamy množství nemají vůbec). Uložený recept se pozná podle toho, že řádek nese id uloženého jídla, a to je ověřené jen na několika záznamech. Prázdný den neodliší „nejedl jsem nic" od „nezapsal jsem nic". Součty za celý den, které web v téže odpovědi posílá, byly u dnů s položkami nulové, a proto se nepoužívají.
-- **`log_food`, `log_meal` a `get_day_summary` kontrolují jen tvar data**, ne existenci dne. Web `31.02.2026` tiše přepočítá na 3. 3. Nové čtecí nástroje neexistující dny odmítají.
+- **Všechny nástroje s datem odmítají neexistující dny.** Web `31.02.2026` tiše přepočítá na 3. 3., takže by se zápis nebo čtení provedlo na jiný den.
+- **Úprava a mazání položek vychází z endpointů, které používá web** (`unit/form` + `unit/edit`, `foodstuff/delete`). Ověřeno na jednom zkušebním záznamu (zapsat, změnit gramy, smazat). Neověřeno: změna jednotky na jinou než původní, smazání řádku z uloženého receptu a úprava či mazání aktivit (ta jsou schválně vynechána). Web maže přes obyčejné `GET`, proto nástroj před smazáním vždy ověří, že `entry_id` je v daném dni, a po smazání den načte znovu.
+- **Poznámky dne obsahují celý uživatelský záznam.** Odpověď webu u každé poznámky přibaluje i e-mail a hash hesla. Klient čte jen `id`, `text` a datum a nic dalšího nepředává. Aktivity z různých zdrojů (telefon, hodinky) se mohou překrývat. Pole `drinkRegime` bylo za 30 dní vždy 0, proto se nevystavuje.
 - **Část porce receptu zalogovat nejde.** Formulář pro přidání jídla sice nabízí `count` proti pseudo-jednotkám porce, procenta a gramy, ale server ho ignoruje a zaloguje vždy celý recept — měřeno na receptu o 249 kcal přidalo 0,5 porce i polovina váhy plných 249. `log_meal` proto nemá argument `portions`; když snědená byla jen část receptu, zalogujte suroviny jednotlivě přes `log_food`.
 
 ## Licence

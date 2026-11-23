@@ -417,3 +417,259 @@ test('getDiaryRange validates the range before logging in', async () => {
   await assert.rejects(client().getDiaryRange('12.11.2026', '10.11.2026'), /after/);
   assert.deepEqual(calls, []);
 });
+
+// ---------------------------------------------------------------------------
+// Activities and notes
+// ---------------------------------------------------------------------------
+
+test('reads activities and notes, and never lets the embedded user record through', () => {
+  const payload = {
+    ...emptyPayload(),
+    activities: [
+      { id: 'act1', title: 'Test chůze', unit: '155 min', energy: '483', steps: null, activityType: 3 },
+      { id: 'act2', title: 'Test kroky', unit: null, energy: '107', steps: 6092, activityType: 8 },
+    ],
+    notes: [
+      {
+        id: 'note1',
+        created: Date.UTC(2026, 10, 10, 9, 0),
+        text: 'Test poznámka',
+        user: { email: 'test@example.invalid', password: 'fake-hash-value', sex: 'X' },
+      },
+    ],
+  };
+  const day = parseDiaryDay(payload, DAY);
+  assert.deepEqual(day.activities, [
+    { id: 'act1', title: 'Test chůze', durationMinutes: 155, steps: null, energy: 483, energyUnit: 'kcal' },
+    { id: 'act2', title: 'Test kroky', durationMinutes: null, steps: 6092, energy: 107, energyUnit: 'kcal' },
+  ]);
+  assert.deepEqual(day.notes, [{ id: 'note1', text: 'Test poznámka', created: '2026-11-10T09:00:00.000Z' }]);
+  assert.doesNotMatch(JSON.stringify(day), /fake-hash-value|example\.invalid|password/);
+});
+
+test('an unreadable activity or note list becomes null, not an empty list, and does not fail the day', () => {
+  const day = parseDiaryDay({ ...emptyPayload(), activities: 'nope', notes: [{ id: 'n', text: 5 }] }, DAY);
+  assert.equal(day.activities, null);
+  assert.equal(day.notes, null);
+  assert.equal(day.entryCount, 0);
+  assert.equal(parseDiaryDay({ ...emptyPayload(), activities: undefined, notes: undefined }, DAY).activities, null);
+});
+
+// ---------------------------------------------------------------------------
+// Calendar validation on the existing write/read tools
+// ---------------------------------------------------------------------------
+
+test('logFood, logMeal and getDaySummary refuse a day that does not exist, before any request', async () => {
+  stubFetch(() => {
+    throw new Error('no request expected');
+  });
+  await assert.rejects(client().logFood({ foodId: 'f', amount: 1, meal: '1', date: '31.02.2026' }), /does not exist/);
+  await assert.rejects(client().logMeal({ mealId: 'm', meal: '1', date: '31.02.2026' }), /does not exist/);
+  await assert.rejects(client().getDaySummary('31.02.2026'), /does not exist/);
+  assert.deepEqual(calls, []);
+});
+
+// ---------------------------------------------------------------------------
+// Deleting and editing diary lines
+// ---------------------------------------------------------------------------
+
+const withEntryIds = (p: ReturnType<typeof filledPayload>) => {
+  for (const t of p.times) for (const l of t.foodstuff as Array<{ id: string }>) l.id = 'entry' + l.id.padEnd(8, '0');
+  return p;
+};
+const ENTRY_A = 'entrya0000000'; // "Test skyr", 200 g
+const ENTRY_C = 'entryc0000000'; // saved-recipe line
+const GRAM = '0000000000000001';
+
+test('deleteDiaryEntry checks the line, deletes exactly that id, then confirms the day', async () => {
+  let present = true;
+  stubFetch(url => {
+    if (url.pathname === '/login/create') return loginOk();
+    if (diaryDate(url)) {
+      const p = withEntryIds(filledPayload());
+      if (!present) {
+        p.times[0]!.foodstuff = p.times[0]!.foodstuff.filter(l => (l as { id: string }).id !== ENTRY_A);
+        p.foodstuffCount = 4;
+      }
+      return json(envelope(p));
+    }
+    if (url.pathname === `/user/diary/foodstuff/delete/${ENTRY_A}`) {
+      present = false;
+      return json({ requestId: null, code: 0, message: 'OK', data: null });
+    }
+    throw new Error(`unexpected ${url.pathname}`);
+  });
+  const result = await client().deleteDiaryEntry({ date: DAY, entryId: ENTRY_A });
+  assert.equal(result.deleted.title, 'Test skyr');
+  assert.equal(result.meal, 'Snídaně');
+  assert.equal(result.confirmed, true);
+  assert.deepEqual(calls, [
+    '/login/create',
+    `/user/diary/${DAY}/get`,
+    `/user/diary/foodstuff/delete/${ENTRY_A}`,
+    `/user/diary/${DAY}/get`,
+  ]);
+});
+
+test('deleteDiaryEntry refuses an id that is not on that day, and a malformed id, without deleting', async () => {
+  stubFetch(url => {
+    if (url.pathname === '/login/create') return loginOk();
+    if (diaryDate(url)) return json(envelope(withEntryIds(filledPayload())));
+    throw new Error(`unexpected ${url.pathname}`);
+  });
+  await assert.rejects(client().deleteDiaryEntry({ date: DAY, entryId: 'entryzzzz0000' }), /No diary entry with id/);
+  assert.ok(!calls.some(c => c.includes('/delete/')));
+
+  calls = [];
+  await assert.rejects(client().deleteDiaryEntry({ date: DAY, entryId: '../../user/settings' }), /Invalid entry id/);
+  await assert.rejects(client().deleteDiaryEntry({ date: '31.02.2026', entryId: ENTRY_A }), /does not exist/);
+  assert.deepEqual(calls, []);
+});
+
+test('deleteDiaryEntry reports confirmed=false when the line is still listed, and null when the re-read fails', async () => {
+  let reads = 0;
+  stubFetch(url => {
+    if (url.pathname === '/login/create') return loginOk();
+    if (diaryDate(url)) {
+      reads += 1;
+      return json(envelope(withEntryIds(filledPayload())));
+    }
+    return json({ code: 0, message: 'OK', data: null });
+  });
+  assert.equal((await client().deleteDiaryEntry({ date: DAY, entryId: ENTRY_A })).confirmed, false);
+
+  reads = 0;
+  stubFetch(url => {
+    if (url.pathname === '/login/create') return loginOk();
+    if (diaryDate(url)) {
+      reads += 1;
+      return reads === 1 ? json(envelope(withEntryIds(filledPayload()))) : json(envelope({ broken: true }));
+    }
+    return json({ code: 0, message: 'OK', data: null });
+  });
+  assert.equal((await client().deleteDiaryEntry({ date: DAY, entryId: ENTRY_A })).confirmed, null);
+});
+
+function editStub(opts: { form?: unknown } = {}) {
+  const seen: { body?: Record<string, unknown>; method?: string; url?: string } = {};
+  let amount = 200;
+  stubFetch((url, init) => {
+    if (url.pathname === '/login/create') return loginOk();
+    if (diaryDate(url)) {
+      const p = withEntryIds(filledPayload());
+      (p.times[0]!.foodstuff[0] as { unit: string }).unit = `${amount} g`;
+      return json(envelope(p));
+    }
+    if (url.pathname === `/user/diary/foodstuff/unit/form/${ENTRY_A}`) {
+      return json(
+        envelope(
+          'form' in opts
+            ? opts.form
+            : {
+                diaryGuid: ENTRY_A,
+                multiplier: amount,
+                unitGuid: GRAM,
+                unitOptions: [
+                  { id: GRAM, title: '1 g', multiplier: 1 },
+                  { id: 'unit100', title: '100 g', multiplier: 100 },
+                ],
+              },
+        ),
+      );
+    }
+    if (url.pathname === '/user/diary/foodstuff/unit/edit') {
+      seen.body = JSON.parse(String(init?.body));
+      seen.method = init?.method;
+      seen.url = url.pathname + url.search;
+      amount = Number(seen.body?.['multiplier']);
+      return json(envelope(null));
+    }
+    throw new Error(`unexpected ${url.pathname}`);
+  });
+  return seen;
+}
+
+test('updateDiaryEntry posts the unit form back whole with the new amount and reports before/after', async () => {
+  const seen = editStub();
+  const change = await client().updateDiaryEntry({ date: DAY, entryId: ENTRY_A, amount: 400 });
+  assert.equal(seen.method, 'POST');
+  assert.equal(seen.url, '/user/diary/foodstuff/unit/edit?format=json&=');
+  assert.equal(seen.body?.['multiplier'], 400);
+  assert.equal(seen.body?.['unitGuid'], GRAM); // the entry keeps its current unit
+  assert.equal(seen.body?.['diaryGuid'], ENTRY_A);
+  assert.equal((seen.body?.['unitOptions'] as unknown[]).length, 2); // options travel back untouched
+  assert.equal(change.before.quantity.total, 200);
+  assert.equal(change.after?.quantity.total, 400);
+});
+
+test('updateDiaryEntry can switch to another of the entry\'s own units', async () => {
+  const seen = editStub();
+  await client().updateDiaryEntry({ date: DAY, entryId: ENTRY_A, amount: 2, unitId: 'unit100' });
+  assert.equal(seen.body?.['unitGuid'], 'unit100');
+  assert.equal(seen.body?.['multiplier'], 2);
+});
+
+test('updateDiaryEntry refuses recipe lines, unknown units, missing forms and bad amounts without posting', async () => {
+  const seen = editStub();
+  await assert.rejects(client().updateDiaryEntry({ date: DAY, entryId: ENTRY_C, amount: 1 }), /saved recipe/);
+  await assert.rejects(client().updateDiaryEntry({ date: DAY, entryId: ENTRY_A, amount: 1, unitId: 'nope' }), /not valid.*Available/s);
+  assert.equal(seen.body, undefined);
+
+  editStub({ form: null }); // the site answers data:null for lines it cannot edit
+  await assert.rejects(client().updateDiaryEntry({ date: DAY, entryId: ENTRY_A, amount: 1 }), /no way to change/);
+
+  calls = [];
+  for (const amount of [0, -5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    await assert.rejects(client().updateDiaryEntry({ date: DAY, entryId: ENTRY_A, amount }), /positive number/);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('an out-of-range note date becomes null instead of failing the whole day', () => {
+  const day = parseDiaryDay({ ...emptyPayload(), notes: [{ id: 'n', text: 'x', created: 1e16 }] }, DAY);
+  assert.deepEqual(day.notes, [{ id: 'n', text: 'x', created: null }]);
+  assert.throws(() => parseDiaryDay({ ...emptyPayload(), date: 1e16 }, DAY), KtError);
+});
+
+test('entry ids with commas or other URL characters are refused', async () => {
+  stubFetch(() => {
+    throw new Error('no request expected');
+  });
+  for (const id of ['entrya0000000,entryc0000000', 'entry a0000000', 'entrya0000000?x=1', 'short']) {
+    await assert.rejects(client().deleteDiaryEntry({ date: DAY, entryId: id }), /Invalid entry id/, id);
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('a delete whose reply cannot be read still succeeds when the day shows the line gone', async () => {
+  let deleted = false;
+  stubFetch(url => {
+    if (url.pathname === '/login/create') return loginOk();
+    if (diaryDate(url)) {
+      const p = withEntryIds(filledPayload());
+      if (deleted) {
+        p.times[0]!.foodstuff = p.times[0]!.foodstuff.filter(l => (l as { id: string }).id !== ENTRY_A);
+        p.foodstuffCount = 4;
+      }
+      return json(envelope(p));
+    }
+    deleted = true; // the server processed it, but the body is not JSON
+    return new Response('<html>ok</html>', { status: 200 });
+  });
+  const result = await client().deleteDiaryEntry({ date: DAY, entryId: ENTRY_A });
+  assert.equal(result.confirmed, true);
+});
+
+test('a delete with an unreadable reply is an error when the line is demonstrably still there', async () => {
+  stubFetch(url => {
+    if (url.pathname === '/login/create') return loginOk();
+    if (diaryDate(url)) return json(envelope(withEntryIds(filledPayload())));
+    return new Response('<html>ok</html>', { status: 200 });
+  });
+  await assert.rejects(client().deleteDiaryEntry({ date: DAY, entryId: ENTRY_A }), /expected JSON/);
+});
+
+test('a login failure during a delete stays an auth error and is not mistaken for an unreadable reply', async () => {
+  stubFetch(() => json({ code: 5, message: 'Špatné heslo', data: null }));
+  await assert.rejects(client().deleteDiaryEntry({ date: DAY, entryId: ENTRY_A }), KtAuthError);
+});
