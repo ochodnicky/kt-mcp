@@ -87,6 +87,73 @@ export interface MealSummary {
 export class KtError extends Error {}
 
 /**
+ * Login failed, or the session could not be (re)established. Callers that loop
+ * over many requests abort on this instead of retrying the login every time.
+ */
+export class KtAuthError extends KtError {}
+
+/** One logged diary line, as the site's diary page shows it. */
+export interface EntryQuantity {
+  /** The site's own display string, verbatim ("3 x kus (19 g)"); null when the site sends none. */
+  raw: string | null;
+  /** How many of the unit. The site omits "1 x", so a bare "porce" is count 1. */
+  count: number | null;
+  /** Portion unit name ("kus", "porce"); null for plain grams/millilitres. */
+  label: string | null;
+  /** Size of one unit, when the site states it ("kus (19 g)" → 19). */
+  unitSize: number | null;
+  unitSizeUnit: 'g' | 'ml' | null;
+  /** count × unitSize; null whenever either part is unknown. */
+  total: number | null;
+  totalUnit: 'g' | 'ml' | null;
+}
+
+/** Nutrient amounts in grams for the logged quantity (not per 100 g). null = the site has no value. */
+export interface EntryNutrients {
+  protein: number | null;
+  carbohydrate: number | null;
+  fat: number | null;
+  fibre: number | null;
+  sugar: number | null;
+  saturatedFat: number | null;
+  salt: number | null;
+}
+
+export interface DiaryEntry {
+  id: string;
+  title: string;
+  /** "recipe" when the line was logged from one of the user's saved recipes. */
+  kind: 'food' | 'recipe';
+  quantity: EntryQuantity;
+  /** Energy for the logged quantity. */
+  energy: number | null;
+  energyUnit: string;
+  nutrients: EntryNutrients;
+}
+
+export interface DiaryMeal {
+  id: string;
+  title: string;
+  energyTotal: number | null;
+  entries: DiaryEntry[];
+}
+
+export interface DiaryDay {
+  /** dd.MM.yyyy, as requested (and confirmed by the site's own date field). */
+  date: string;
+  energyUnit: string;
+  meals: DiaryMeal[];
+  entryCount: number;
+}
+
+export type DayOutcome =
+  | { date: string; status: 'filled' | 'empty'; day: DiaryDay }
+  | { date: string; status: 'error'; error: string };
+
+/** Hard cap for get_diary_range, inclusive of both end days. */
+export const MAX_RANGE_DAYS = 14;
+
+/**
  * A food's base unit — the one whose multiplier is 1 (the site sends `null`
  * for it). Grams for solids, millilitres for liquids, and a liquid's unit list
  * does not contain the gram unit at all, so this must be read per food rather
@@ -117,17 +184,22 @@ export function formatCzechDate(date: Date): string {
   return `${dd}.${mm}.${date.getFullYear()}`;
 }
 
-export function todayCzech(): string {
-  // The diary runs on Czech wall-clock time; the server usually doesn't
-  // (containers default to UTC, which would flip the date around midnight).
+/** An instant as the dd.MM.yyyy date on the Czech wall clock. */
+export function pragueDate(instant: Date): string {
   const parts = new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Europe/Prague',
     day: '2-digit',
     month: '2-digit',
     year: 'numeric',
-  }).formatToParts(new Date());
+  }).formatToParts(instant);
   const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
   return `${get('day')}.${get('month')}.${get('year')}`;
+}
+
+export function todayCzech(): string {
+  // The diary runs on Czech wall-clock time; the server usually doesn't
+  // (containers default to UTC, which would flip the date around midnight).
+  return pragueDate(new Date());
 }
 
 /**
@@ -139,6 +211,192 @@ export function assertCzechDate(date: string): string {
     throw new Error(`Invalid date "${date}" — expected dd.MM.yyyy, e.g. ${todayCzech()}`);
   }
   return date;
+}
+
+/** Epoch milliseconds of midnight UTC for a dd.MM.yyyy string, or null when it is not a real calendar day. */
+function utcDayOf(date: string): number | null {
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(date);
+  if (!m) return null;
+  const [dd, mm, yyyy] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  const t = new Date(Date.UTC(yyyy, mm - 1, dd));
+  const real = t.getUTCFullYear() === yyyy && t.getUTCMonth() === mm - 1 && t.getUTCDate() === dd;
+  return real ? t.getTime() : null;
+}
+
+/**
+ * Like assertCzechDate, but also rejects days that do not exist. The site
+ * silently rolls 31.02.2026 over to 03.03.2026, which would answer for the
+ * wrong day without any error, so the read tools validate the calendar too.
+ */
+export function assertCalendarDate(date: string): string {
+  assertCzechDate(date);
+  if (utcDayOf(date) === null) throw new Error(`Invalid date "${date}" — that day does not exist in the calendar`);
+  return date;
+}
+
+/** Every day from `from` to `to`, both included, as dd.MM.yyyy. */
+export function enumerateDays(from: string, to: string, maxDays = MAX_RANGE_DAYS): string[] {
+  const start = utcDayOf(assertCalendarDate(from));
+  const end = utcDayOf(assertCalendarDate(to));
+  if (start === null || end === null) throw new Error('Invalid date range'); // unreachable after the asserts
+  if (start > end) throw new Error(`Invalid range: "from" (${from}) is after "to" (${to})`);
+  const DAY = 86_400_000;
+  const count = Math.round((end - start) / DAY) + 1;
+  if (count > maxDays) {
+    throw new Error(`Range too long: ${count} days requested, the maximum is ${maxDays} (both end days included)`);
+  }
+  const days: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const d = new Date(start + i * DAY);
+    days.push(
+      `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.${d.getUTCFullYear()}`,
+    );
+  }
+  return days;
+}
+
+const NUM = String.raw`(\d[\d ]*(?:,\d+)?)`;
+const LABEL = String.raw`([^()\d][^()]*?)`;
+const QUANTITY_PATTERNS = {
+  countTimesSize: new RegExp(String.raw`^${NUM} x ${NUM} (g|ml)$`), // "50 x 1 g"
+  plain: new RegExp(String.raw`^${NUM} (g|ml)$`), // "200 g"
+  countLabelSized: new RegExp(String.raw`^${NUM} x ${LABEL} \(${NUM} (g|ml)\)$`), // "3 x kus (19 g)"
+  labelSized: new RegExp(String.raw`^${LABEL} \(${NUM} (g|ml)\)$`), // "porce (50 g)"
+  countLabel: new RegExp(String.raw`^${NUM} x ${LABEL}$`), // "0,84 x porce"
+  label: new RegExp(String.raw`^${LABEL}$`), // "porce"
+};
+
+/**
+ * Best-effort reading of the site's quantity display string. The diary payload
+ * carries no numeric amount, only this text, so the raw string is always kept
+ * and anything that does not match a known shape comes back with nulls rather
+ * than a guess. Never throws.
+ */
+export function parseQuantity(raw: unknown): EntryQuantity {
+  const rawText = typeof raw === 'string' ? raw : null;
+  const make = (p: Partial<EntryQuantity> = {}): EntryQuantity => ({
+    raw: rawText,
+    count: null,
+    label: null,
+    unitSize: null,
+    unitSizeUnit: null,
+    total: null,
+    totalUnit: null,
+    ...p,
+  });
+  if (rawText === null || rawText.trim() === '') return make();
+
+  const text = rawText.replace(/[  ]/g, ' ').trim();
+  const round = (n: number) => Math.round(n * 10_000) / 10_000;
+  const unitOf = (u: string | undefined): 'g' | 'ml' | null => (u === 'g' || u === 'ml' ? u : null);
+  const sized = (count: number, label: string | null, size: number, unit: 'g' | 'ml') =>
+    make({ count, label, unitSize: size, unitSizeUnit: unit, total: round(count * size), totalUnit: unit });
+
+  let m = QUANTITY_PATTERNS.countTimesSize.exec(text);
+  if (m) {
+    const count = parseCzechNumber(m[1]);
+    const size = parseCzechNumber(m[2]);
+    const unit = unitOf(m[3]);
+    if (count !== null && size !== null && unit) return sized(count, null, size, unit);
+    return make();
+  }
+  m = QUANTITY_PATTERNS.plain.exec(text);
+  if (m) {
+    const total = parseCzechNumber(m[1]);
+    const unit = unitOf(m[2]);
+    if (total !== null && unit) return make({ total, totalUnit: unit });
+    return make();
+  }
+  m = QUANTITY_PATTERNS.countLabelSized.exec(text);
+  if (m) {
+    const count = parseCzechNumber(m[1]);
+    const size = parseCzechNumber(m[3]);
+    const unit = unitOf(m[4]);
+    if (count !== null && size !== null && unit && m[2]) return sized(count, m[2], size, unit);
+    return make();
+  }
+  m = QUANTITY_PATTERNS.labelSized.exec(text);
+  if (m) {
+    const size = parseCzechNumber(m[2]);
+    const unit = unitOf(m[3]);
+    if (size !== null && unit && m[1]) return sized(1, m[1], size, unit);
+    return make();
+  }
+  m = QUANTITY_PATTERNS.countLabel.exec(text);
+  if (m) {
+    const count = parseCzechNumber(m[1]);
+    if (count !== null && m[2]) return make({ count, label: m[2] });
+    return make();
+  }
+  m = QUANTITY_PATTERNS.label.exec(text);
+  if (m?.[1]) return make({ count: 1, label: m[1] });
+  return make();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseDiaryEntry(raw: unknown, dayEnergyUnit: string, where: string): DiaryEntry {
+  if (!isRecord(raw)) throw new KtError(`${where}: diary line is not an object`);
+  if (typeof raw['title'] !== 'string') throw new KtError(`${where}: diary line has no title`);
+  // A saved recipe is a normal "foodstuff" line that carries the recipe's guid.
+  const isRecipe = typeof raw['guidUserMeal'] === 'string' || raw['isRecipe'] === true;
+  return {
+    id: String(raw['id'] ?? ''),
+    title: raw['title'],
+    kind: isRecipe ? 'recipe' : 'food',
+    quantity: parseQuantity(raw['unit']),
+    energy: parseCzechNumber(raw['energy']),
+    energyUnit: typeof raw['energyUnit'] === 'string' ? raw['energyUnit'] : dayEnergyUnit,
+    nutrients: {
+      protein: parseCzechNumber(raw['protein']),
+      carbohydrate: parseCzechNumber(raw['carbohydrate']),
+      fat: parseCzechNumber(raw['fat']),
+      fibre: parseCzechNumber(raw['fiber']),
+      sugar: parseCzechNumber(raw['sugar']),
+      saturatedFat: parseCzechNumber(raw['saturatedFattyAcid']),
+      salt: parseCzechNumber(raw['salt']),
+    },
+  };
+}
+
+/**
+ * Turns the payload of `/user/diary/{date}/get` into typed entries. Anything
+ * structurally unexpected throws — an unrecognised response must never look
+ * like an empty day. The payload's own day-level totals are deliberately
+ * ignored: they were 0 on days that had entries.
+ */
+export function parseDiaryDay(data: unknown, requestedDate: string): DiaryDay {
+  const where = `diary ${requestedDate}`;
+  if (!isRecord(data)) throw new KtError(`${where}: expected an object`);
+  if (!Array.isArray(data['times'])) throw new KtError(`${where}: response has no meal list`);
+
+  // The site answers for whatever day it parsed, so confirm it is the one asked for.
+  const epoch = data['date'];
+  if (typeof epoch !== 'number' || !Number.isFinite(epoch)) throw new KtError(`${where}: response has no date`);
+  const answered = pragueDate(new Date(epoch));
+  if (answered !== requestedDate) throw new KtError(`${where}: the site answered for ${answered}`);
+
+  const energyUnit = typeof data['energyUnit'] === 'string' ? data['energyUnit'] : 'kcal';
+  const meals: DiaryMeal[] = data['times'].map((slot: unknown, i: number) => {
+    if (!isRecord(slot)) throw new KtError(`${where}: meal ${i} is not an object`);
+    if (typeof slot['title'] !== 'string') throw new KtError(`${where}: meal ${i} has no title`);
+    if (!Array.isArray(slot['foodstuff'])) throw new KtError(`${where}: meal "${slot['title']}" has no entry list`);
+    return {
+      id: String(slot['id'] ?? i),
+      title: slot['title'],
+      energyTotal: parseCzechNumber(slot['energyTotal']),
+      entries: slot['foodstuff'].map((raw: unknown) => parseDiaryEntry(raw, energyUnit, `${where} / ${String(slot['title'])}`)),
+    };
+  });
+
+  const entryCount = meals.reduce((n, m) => n + m.entries.length, 0);
+  const declared = data['foodstuffCount'];
+  if (typeof declared === 'number' && declared !== entryCount) {
+    throw new KtError(`${where}: site reports ${declared} entries but ${entryCount} were present`);
+  }
+  return { date: requestedDate, energyUnit, meals, entryCount };
 }
 
 export interface KtCredentials {
@@ -206,14 +464,20 @@ export class KtClient {
   private async login(): Promise<void> {
     if (this.loginInFlight) return this.loginInFlight;
     this.loginInFlight = (async () => {
-      this.cookie = null;
-      const passwordHash = createHash('md5').update(this.credentials.password).digest('hex');
-      const { text } = await this.request('/login/create?format=json', {
-        method: 'POST',
-        body: { email: this.credentials.email, password: passwordHash },
-      });
-      this.parseEnvelope(text, 'login');
-      if (!this.cookie) throw new KtError('login succeeded but no session cookie was issued');
+      try {
+        this.cookie = null;
+        const passwordHash = createHash('md5').update(this.credentials.password).digest('hex');
+        const { text } = await this.request('/login/create?format=json', {
+          method: 'POST',
+          body: { email: this.credentials.email, password: passwordHash },
+        });
+        this.parseEnvelope(text, 'login');
+        if (!this.cookie) throw new KtError('login succeeded but no session cookie was issued');
+      } catch (error) {
+        // Tagged so loops over many requests can stop at the first login failure.
+        if (error instanceof KtAuthError) throw error;
+        throw new KtAuthError(error instanceof Error ? error.message : String(error), { cause: error });
+      }
     })().finally(() => {
       this.loginInFlight = null;
     });
@@ -230,7 +494,7 @@ export class KtClient {
     if (result.redirectedToLogin) {
       await this.login();
       result = await this.request(path, init);
-      if (result.redirectedToLogin) throw new KtError(`${path}: still unauthenticated after re-login`);
+      if (result.redirectedToLogin) throw new KtAuthError(`${path}: still unauthenticated after re-login`);
     }
     return this.parseEnvelope(result.text, path);
   }
@@ -356,6 +620,38 @@ export class KtClient {
   /** Raw daily summary. Shape is not fully documented, so it is passed through. */
   async getDaySummary(date?: string): Promise<unknown> {
     return this.authed(`/statistic/summary/${date === undefined ? todayCzech() : assertCzechDate(date)}/get?format=json`);
+  }
+
+  /**
+   * The individual entries logged on one day, grouped by meal. Reads the same
+   * endpoint the site's own diary page uses (`/user/diary/{date}/get`), which —
+   * unlike the summary — lists every logged line with its quantity and
+   * nutrients. Omit the date for today.
+   */
+  async getDayEntries(date?: string): Promise<DiaryDay> {
+    const day = date === undefined ? todayCzech() : assertCalendarDate(date);
+    const data = await this.authed(`/user/diary/${day}/get?format=json`);
+    return parseDiaryDay(data, day);
+  }
+
+  /**
+   * getDayEntries for every day from `from` to `to`, both included, one day at
+   * a time. A day that fails to load is reported as such and the rest carry
+   * on; a login failure aborts the whole range, since every remaining day
+   * would only repeat it.
+   */
+  async getDiaryRange(from: string, to: string): Promise<DayOutcome[]> {
+    const outcomes: DayOutcome[] = [];
+    for (const date of enumerateDays(from, to)) {
+      try {
+        const day = await this.getDayEntries(date);
+        outcomes.push({ date, status: day.entryCount === 0 ? 'empty' : 'filled', day });
+      } catch (error) {
+        if (error instanceof KtAuthError) throw error;
+        outcomes.push({ date, status: 'error', error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return outcomes;
   }
 
   // ---------------------------------------------------------------------

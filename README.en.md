@@ -46,6 +46,8 @@ Once connected, food logging stops being a chore of tapping through search scree
 | `get_food_nutrition` | Calories and macros for a quantity, scaled by the site itself. Read-only. |
 | `log_food` | Write an eating record into the diary. |
 | `get_day_summary` | Read back a day's totals. |
+| `get_day_entries` | Read the individual entries logged on one day (foods and saved recipes), grouped by meal: name, logged quantity and nutrients. Read-only. |
+| `get_diary_range` | The same for a range of days `from`–`to` (both end days included, at most 14 days). Each day is reported as filled, empty or failed to load. Read-only. |
 | `create_meal` | Save a recipe built from existing foods. |
 | `list_my_meals` | List saved recipes with their ids and total energy. |
 | `log_meal` | Log a whole saved recipe into the diary as one entry. |
@@ -240,7 +242,9 @@ on the form before authorizing.
 - **`md5(password)` is password-equivalent.** The site hashes the password client-side, so the hash is as sensitive as the password. Treat `KT_PASSWORD` accordingly.
 - **One account per instance.** The server logs into a single kaloricketabulky.cz account. Two people, two containers.
 - **Personal use.** Automating entry into your own account is a far softer position than bulk scraping, but it is still outside anything Dine4Fit has sanctioned. Keep the request rate human, and don't build a competing client on it.
-- **Reading a day's individual entries** is the least-verified endpoint; `get_day_summary` passes the site's response through unmodified because its shape isn't fully documented.
+- **`get_day_summary` does not contain individual entries.** It returns day totals, goals, profile values and weekly charts, and passes the site's response through unmodified because its shape isn't fully documented. The entries come from `get_day_entries` and `get_diary_range`, which read `/user/diary/{dd.MM.yyyy}/get`, the endpoint the site's own diary page uses.
+- **Reading a day's entries is based on observation, not documentation.** The response shape was derived from one account over 30 days, and the client throws on any deviation. The site sends the quantity only as display text (`3 x kus (19 g)`); `quantity.raw` is always that text, and the numbers derived from it are `null` when it could not be read (some entries have no quantity at all). A saved recipe is recognised by the line carrying a saved-meal id, which has been confirmed on only a handful of entries. An empty day cannot tell "ate nothing" from "logged nothing". The day-level totals the site sends in the same response were 0 on days that had entries, so they are not used.
+- **`log_food`, `log_meal` and `get_day_summary` check only the shape of a date**, not that the day exists. The site silently rolls `31.02.2026` over to 3 March. The new read tools reject days that do not exist.
 - **Partial portions of a recipe cannot be logged.** The meal-add form offers a `count` against portion, percent and gram pseudo-units, but the server ignores it and logs the whole recipe regardless — measured against a 249 kcal recipe, both 0.5 portions and half the total weight added the full 249. `log_meal` therefore takes no `portions` argument; log the ingredients individually with `log_food` when only part of a recipe was eaten.
 
 ## License

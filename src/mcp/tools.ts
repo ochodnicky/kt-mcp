@@ -8,7 +8,15 @@
 
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { GRAM_UNIT, KtClient, MEALS, type MealId, todayCzech } from '../kt/client.js';
+import {
+  type DiaryDay,
+  GRAM_UNIT,
+  KtClient,
+  MAX_RANGE_DAYS,
+  MEALS,
+  type MealId,
+  todayCzech,
+} from '../kt/client.js';
 
 const MEAL_IDS = Object.keys(MEALS) as [MealId, ...MealId[]];
 
@@ -273,4 +281,99 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       return json({ date: date ?? todayCzech(), summary: await kt.getDaySummary(date) });
     }),
   );
+
+  server.registerTool(
+    'get_day_entries',
+    {
+      title: 'Get the individual entries logged on a day',
+      description:
+        'Read every food and recipe actually logged on one day, grouped by meal, each with its name, the logged quantity and its nutrients. Read-only. ' +
+        'Use this instead of get_day_summary whenever the question is about WHICH foods were eaten ("what gave me the most protein", "what did I have for dinner"); get_day_summary only has totals and goals. ' +
+        'Nutrient values are for the logged quantity, not per 100 g. A null value means the site has no figure for it — it is not zero. ' +
+        'Empty meals are left out. For several days use get_diary_range.',
+      inputSchema: {
+        date: z.string().optional().describe(dateDescription),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_day_entries', async ({ date }) => {
+      return json({ ...presentDay(await kt.getDayEntries(date)), notes: ENTRY_NOTES });
+    }),
+  );
+
+  server.registerTool(
+    'get_diary_range',
+    {
+      title: 'Get logged entries for a range of days',
+      description:
+        `Read the individual logged entries for every day from \`from\` to \`to\`, both included, at most ${MAX_RANGE_DAYS} days. Read-only. ` +
+        'Same per-entry detail as get_day_entries; use it for week-level questions such as "which foods gave me the most protein this week". ' +
+        'Each day has a status: "filled" (has entries), "empty" (the site returned no entries — that cannot tell "ate nothing" from "did not log" or a future date) or "error" (that day failed to load; the rest are still returned). ' +
+        'If the login fails the whole call fails. Nutrient values are for the logged quantity; null means unknown, not zero.',
+      inputSchema: {
+        from: z.string().describe('First day, dd.MM.yyyy.'),
+        to: z.string().describe(`Last day, dd.MM.yyyy. Must not be before "from", and at most ${MAX_RANGE_DAYS} days from it, both included.`),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_diary_range', async ({ from, to }) => {
+      const outcomes = await kt.getDiaryRange(from, to);
+      const count = (s: string) => outcomes.filter(o => o.status === s).length;
+      return json({
+        from,
+        to,
+        counts: { filled: count('filled'), empty: count('empty'), error: count('error') },
+        days: outcomes.map(o =>
+          o.status === 'error'
+            ? { date: o.date, status: o.status, error: o.error }
+            : { status: o.status, ...presentDay(o.day) },
+        ),
+        notes: ENTRY_NOTES,
+      });
+    }),
+  );
+}
+
+const ENTRY_NOTES =
+  'quantity.raw is the site\'s own text and is always correct; count/label/unit_size/total are parsed from it and are null when it could not be read (some lines have no quantity at all). ' +
+  'Nutrients are grams for the logged quantity; energy is in energy_unit. Lines with kind "recipe" were logged from a saved recipe.';
+
+function presentDay(day: DiaryDay) {
+  return {
+    date: day.date,
+    entry_count: day.entryCount,
+    energy_unit: day.energyUnit,
+    // Empty slots add nothing but length, which matters over a 14-day range.
+    meals: day.meals
+      .filter(meal => meal.entries.length > 0)
+      .map(meal => ({
+        meal_id: meal.id,
+        meal: meal.title,
+        energy_total: meal.energyTotal,
+        entries: meal.entries.map(e => ({
+          title: e.title,
+          kind: e.kind,
+          quantity: {
+            raw: e.quantity.raw,
+            count: e.quantity.count,
+            label: e.quantity.label,
+            unit_size: e.quantity.unitSize,
+            unit_size_unit: e.quantity.unitSizeUnit,
+            total: e.quantity.total,
+            total_unit: e.quantity.totalUnit,
+          },
+          energy: e.energy,
+          energy_unit: e.energyUnit,
+          nutrients: {
+            protein: e.nutrients.protein,
+            carbohydrate: e.nutrients.carbohydrate,
+            fat: e.nutrients.fat,
+            fibre: e.nutrients.fibre,
+            sugar: e.nutrients.sugar,
+            saturated_fat: e.nutrients.saturatedFat,
+            salt: e.nutrients.salt,
+          },
+        })),
+      })),
+  };
 }
