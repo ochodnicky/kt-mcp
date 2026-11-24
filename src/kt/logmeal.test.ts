@@ -47,7 +47,7 @@ const form = (over: Record<string, unknown> = {}, items = [ing('i1', 'okurka', 1
   selectedUnitGuid: '0000000000000001',
   dontSendUnit: null,
   foodstuff: items,
-  units: [{ id: '0000000000000003', title: '%', multiplier: -1 }, { id: '0000000000000001', title: '1 g', multiplier: 1 }],
+  units: [{ id: '0000000000000004', title: 'porce', multiplier: -2 }, { id: '0000000000000003', title: '%', multiplier: -1 }, { id: '0000000000000001', title: '1 g', multiplier: 1 }],
   ...over,
 });
 
@@ -97,14 +97,29 @@ test('without an amount the whole recipe is logged exactly as before: portion un
   assert.deepEqual([r.amount, r.factor, r.expectedEnergy], [{ kind: 'whole' }, 1, 400]);
 });
 
-test('portions are scaled over the recipe\'s portion count, on every ingredient, with the unit left alone and dontSendUnit set', async () => {
+test('portions are scaled over the recipe\'s portion count, on every ingredient, and posted with the portion unit and the amount like the site does', async () => {
   serve(routes({ form: form({ portionsMax: 4 }) }));
   const r = await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, portions: 1 });
   const b = posted();
   assert.deepEqual(counts(), [25, 25]);
-  assert.deepEqual([b['dontSendUnit'], b['selectedUnitGuid'], b['selectedUnitMultiplier'], b['count']], [true, '0000000000000001', 200, null]);
+  assert.deepEqual([b['dontSendUnit'], b['selectedUnitGuid'], b['selectedUnitMultiplier']], [false, '0000000000000004', 1]);
   assert.deepEqual([r.factor, r.expectedEnergy, r.amount], [0.25, 100, { kind: 'portions', value: 1, of: 4 }]);
   assert.equal(r.added?.id, 'newline00001');
+});
+
+test('grams and percent are posted with the gram or percent unit and the typed amount, so the line reads like one typed on the site', async () => {
+  serve(routes());
+  await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, grams: 126 });
+  assert.deepEqual([posted()['selectedUnitGuid'], posted()['selectedUnitMultiplier'], posted()['dontSendUnit']], ['0000000000000001', 126, false]);
+  serve(routes());
+  await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, percent: 50 });
+  assert.deepEqual([posted()['selectedUnitGuid'], posted()['selectedUnitMultiplier'], posted()['dontSendUnit']], ['0000000000000003', 50, false]);
+});
+
+test('a recipe whose form offers no such unit is still scaled, with the label left to the site', async () => {
+  serve(routes({ form: form({ units: [] }) }));
+  await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, percent: 50 });
+  assert.deepEqual([counts(), posted()['dontSendUnit'], posted()['selectedUnitGuid']], [[50, 50], true, '0000000000000001']);
 });
 
 test('grams are taken out of the total weight of the selected ingredients, and percent as a share', async () => {

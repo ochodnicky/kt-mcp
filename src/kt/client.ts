@@ -1640,10 +1640,10 @@ export class KtClient {
    * Logs a saved recipe into the diary, whole or a part of it.
    *
    * The site never scales a recipe on the server. Its own dialog rescales the `count` of every ingredient in the
-   * browser (by portions, grams or percent) and posts the form with the flag `dontSendUnit`; the top-level
-   * `count` and unit are ignored, which is why setting only those logs the whole recipe. This does what the
-   * dialog does: the factor is applied to each selected ingredient's original count. The diary line then
-   * shows the eaten weight ("100 g"). Without an amount the recipe is logged whole, as before.
+   * browser (by portions, grams or percent) and posts the form with the chosen unit and amount; the server writes
+   * the ingredient counts, and the unit and amount become the label of the line. Setting only the top-level
+   * `count` and unit therefore logs the whole recipe. This does what the dialog does, so the line reads exactly as
+   * one typed on the site ("126 x 1 g", "0,84 x porce", "50%"). Without an amount the recipe is logged whole, as before.
    *
    * At most one of `portions` (needs a portion count on the recipe), `grams` (of the whole recipe's weight)
    * or `percent` may be given.
@@ -1698,14 +1698,26 @@ export class KtClient {
       payload['selectedUnitGuid'] = PORTION_UNIT;
       payload['count'] = 1;
     } else {
-      payload['dontSendUnit'] = true;
+      // The site's dialog also puts the chosen unit and amount on the form, and the server writes them as the line's
+      // label ("126 x 1 g", "0,84 x porce", "50%"). Without them the label is derived from the ingredients and can be a
+      // gram off. The unit is the one the site itself lists (-2 portion, -1 percent, 1 gram); if the recipe offers none,
+      // the label is left to the site and only the ingredients are scaled (dontSendUnit).
+      const wantedUnit = amount.kind === 'portions' ? -2 : amount.kind === 'percent' ? -1 : 1;
+      const unit = (Array.isArray(form['units']) ? (form['units'] as unknown[]) : []).filter(isRecord).find(u => u['multiplier'] === wantedUnit);
+      if (unit && typeof unit['id'] === 'string') {
+        payload['selectedUnitGuid'] = unit['id'];
+        payload['selectedUnitMultiplier'] = amount.value;
+        payload['dontSendUnit'] = false;
+      } else {
+        payload['dontSendUnit'] = true;
+      }
       payload['foodstuff'] = ingredients.map(i => {
         if (i['selected'] === false) return i;
         const base = parseCzechNumber(i['countOriginal']) ?? parseCzechNumber(i['count']);
         if (base === null) throw new KtError(`"${title}": the site gives no amount for ${String(i['title'])}, so the recipe cannot be scaled.`);
         // Like the dialog, scale from the original unit: the original count only means something in the original unit.
-        const unit = typeof i['selectedUnitGuidOriginal'] === 'string' ? { selectedUnitGuid: i['selectedUnitGuidOriginal'] } : {};
-        return { ...i, ...unit, count: Math.round(base * factor * 10_000) / 10_000 };
+        const keep = typeof i['selectedUnitGuidOriginal'] === 'string' ? { selectedUnitGuid: i['selectedUnitGuidOriginal'] } : {};
+        return { ...i, ...keep, count: Math.round(base * factor * 10_000) / 10_000 };
       });
     }
 

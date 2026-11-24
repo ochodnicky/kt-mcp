@@ -470,11 +470,12 @@ if (WRITE) {
       const { m, d } = pick;
       try {
         const one = await client.logMeal({ mealId: m.id, meal: '1', date: tomorrow, portions: 1 });
-        ok('one portion of a recipe has about its share of the energy', one.added !== null && Math.abs(one.added.energy - m.energy / d.portions) <= Math.max(3, (m.energy / d.portions) * 0.03), `${one.added?.energy} vs ${(m.energy / d.portions).toFixed(1)} kcal, shown as "${one.added?.quantity.raw}"`);
+        ok('one portion of a recipe has about its share of the energy and reads "porce" like the site', one.added !== null && one.added.quantity.raw === 'porce' && Math.abs(one.added.energy - m.energy / d.portions) <= Math.max(3, (m.energy / d.portions) * 0.03), `${one.added?.energy} vs ${(m.energy / d.portions).toFixed(1)} kcal, shown as "${one.added?.quantity.raw}"`);
         const half = await client.logMeal({ mealId: m.id, meal: '1', date: tomorrow, percent: 50 });
-        ok('half of a recipe has half of the energy', half.added !== null && Math.abs(half.added.energy - m.energy / 2) <= Math.max(3, (m.energy / 2) * 0.03), `${half.added?.energy} vs ${(m.energy / 2).toFixed(1)} kcal`);
-        const grams = await client.logMeal({ mealId: m.id, meal: '1', date: tomorrow, grams: Math.round(d.totalWeight / 4) });
-        ok('a quarter of the weight has a quarter of the energy', grams.added !== null && Math.abs(grams.added.energy - m.energy / 4) <= Math.max(4, (m.energy / 4) * 0.04), `${grams.added?.energy} vs ${(m.energy / 4).toFixed(1)} kcal, shown as "${grams.added?.quantity.raw}"`);
+        ok('half of a recipe has half of the energy and reads "50%"', half.added !== null && half.added.quantity.raw === '50%' && Math.abs(half.added.energy - m.energy / 2) <= Math.max(3, (m.energy / 2) * 0.03), `${half.added?.energy} vs ${(m.energy / 2).toFixed(1)} kcal`);
+        const quarter = Math.round(d.totalWeight / 4);
+        const grams = await client.logMeal({ mealId: m.id, meal: '1', date: tomorrow, grams: quarter });
+        ok('a quarter of the weight has a quarter of the energy and reads like a gram amount typed on the site', grams.added !== null && grams.added.quantity.raw === `${quarter} x 1 g` && Math.abs(grams.added.energy - m.energy / 4) <= Math.max(4, (m.energy / 4) * 0.04), `${grams.added?.energy} vs ${(m.energy / 4).toFixed(1)} kcal, shown as "${grams.added?.quantity.raw}"`);
       } catch (e) {
         ok('partial recipe logging completed', false, e.message);
       } finally {
