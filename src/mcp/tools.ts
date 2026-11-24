@@ -253,7 +253,7 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       description:
         "Log one of the user's saved recipes into their diary as a single entry, whole or a part of it. Find the recipe id with list_my_meals first. This writes to their real diary, so confirm the amount when it is unclear. " +
         'Without an amount the WHOLE recipe is logged. When the user ate only part of it, give exactly one of: portions (e.g. 1 or 0.5; needs the recipe to have a portion count, see portions in get_meal_details; set it with update_meal if missing), ' +
-        'grams (the weight of what they ate, out of the recipe\'s total weight in get_meal_details) or percent (e.g. 25 for a quarter). ' +
+        'grams (the weight of what they ate, out of the recipe\'s total_weight_g in get_meal_details; grams for solids, millilitres for liquids; refused when the site\'s ingredient weights are missing or do not add up to it) or percent (e.g. 25 for a quarter). ' +
         'The site scales every ingredient proportionally, as its own dialog does. The result shows the line the site wrote and compares its energy with the share of the whole recipe\'s energy; if energy_matches is false, check it with get_day_entries and delete_diary_entry before logging again.',
       inputSchema: {
         meal_id: z.string().min(1).describe('Recipe id from list_my_meals.'),
@@ -268,7 +268,9 @@ export function registerTools(server: McpServer, kt: KtClient): void {
     guard('log_meal', async ({ meal_id, meal, date, portions, grams, percent }) => {
       const r = await kt.logMeal({ mealId: meal_id, meal, date, portions, grams, percent });
       const eaten = r.added?.energy ?? null;
-      const matches = eaten !== null && r.expectedEnergy !== null ? Math.abs(eaten - r.expectedEnergy) <= Math.max(3, r.expectedEnergy * 0.03) : null;
+      // Compared only when both energies are known and in the same unit. A zero line for a non-trivial share never matches.
+      const comparable = eaten !== null && r.expectedEnergy !== null && r.added?.energyUnit === r.wholeRecipeEnergyUnit;
+      const matches = comparable ? Math.abs(eaten - r.expectedEnergy!) <= Math.max(2, r.expectedEnergy! * 0.03) && !(eaten === 0 && r.expectedEnergy! > 1) : null;
       return json({
         logged: true,
         recipe: r.recipe,
@@ -285,7 +287,9 @@ export function registerTools(server: McpServer, kt: KtClient): void {
             ? 'The recipe was accepted but the new line could not be identified afterwards; check it with get_day_entries before logging it again.'
             : matches === false
               ? 'The energy of the line differs from the expected share of the recipe. Check it with get_day_entries; delete_diary_entry removes it.'
-              : undefined,
+              : matches === null
+                ? 'The line was written but its energy could not be compared with the recipe\'s (the recipe list did not show it, or the units differ); check it with get_day_entries.'
+                : undefined,
       });
     }),
   );

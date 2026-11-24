@@ -128,7 +128,7 @@ test('the original count is what is scaled, so a form that was already changed c
 });
 
 test('an ingredient the site marks as not selected is left out of the weight and posted as it was', async () => {
-  serve(routes({ form: form({}, [ing('i1', 'okurka', 100), ing('i2', 'mrkev', 100, { selected: false, count: 0 })]) }));
+  serve(routes({ form: form({ totalWeight: 100 }, [ing('i1', 'okurka', 100), ing('i2', 'mrkev', 100, { selected: false, count: 0 })]) }));
   const r = await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, grams: 50 });
   assert.deepEqual(counts(), [50, 0]);
   assert.equal(r.amount.kind === 'grams' && r.amount.of, 100);
@@ -144,10 +144,10 @@ test('nothing is posted for more than one amount, a silly amount, a recipe witho
   await assert.rejects(c.logMeal({ mealId: MEAL, meal: '1', portions: 1 }), /no portion count.*update_meal/);
   await assert.rejects(c.logMeal({ mealId: MEAL, meal: '1', percent: 1500 }), /looks like a mistake/);
   await assert.rejects(c.logMeal({ mealId: MEAL, meal: '1', date: '31.02.2026', percent: 50 }), /does not exist/);
-  await assert.rejects(c.logMeal({ mealId: '../x', meal: '1', percent: 50 }), /Invalid entry id/);
+  await assert.rejects(c.logMeal({ mealId: '../x', meal: '1', percent: 50 }), /Invalid recipe id.*list_my_meals/);
   assert.deepEqual(writes(), []);
   serve(routes({ form: form({}, [ing('i1', 'okurka', 100, { weight: null }), ing('i2', 'mrkev', 100, { weight: null })]) }));
-  await assert.rejects(client().logMeal({ mealId: MEAL, meal: '1', grams: 50 }), /no weight/);
+  await assert.rejects(client().logMeal({ mealId: MEAL, meal: '1', grams: 50 }), /no weight for okurka, mrkev/);
   assert.deepEqual(writes(), []);
 });
 
@@ -174,4 +174,54 @@ test('get_meal_details data now carries the total weight and the portion count',
   assert.deepEqual([d.totalWeight, d.portions], [1431, 14]);
   serve([[`/user/meal/add/form/${MEAL}`, () => json(envelope(form()))]]);
   assert.equal((await client().getMealDetails(MEAL)).portions, null);
+});
+
+test('grams are refused when one ingredient has no weight, because the share would be wrong with no sign of it', async () => {
+  serve(routes({ form: form({ totalWeight: 200 }, [ing('i1', 'okurka', 100), ing('i2', 'vejce', 2, { weight: null })]) }));
+  await assert.rejects(client().logMeal({ mealId: MEAL, meal: '1', date: PAST, grams: 50 }), /no weight for vejce/);
+  assert.deepEqual(writes(), []);
+  // percent and portions do not need weights
+  serve(routes({ form: form({ portionsMax: 2 }, [ing('i1', 'okurka', 100), ing('i2', 'vejce', 2, { weight: null })]) }));
+  await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, portions: 1 });
+  assert.deepEqual(counts(), [50, 1]);
+});
+
+test('grams are refused when the ingredient weights do not add up to the weight the site states for the recipe', async () => {
+  serve(routes({ form: form({ totalWeight: 1431 }, [ing('i1', 'okurka', 600), ing('i2', 'mrkev', 600)]) }));
+  await assert.rejects(client().logMeal({ mealId: MEAL, meal: '1', date: PAST, grams: 350 }), /add up to 1200 g but the site states 1431 g/);
+  assert.deepEqual(writes(), []);
+  serve(routes({ form: form({ totalWeight: 1210 }, [ing('i1', 'okurka', 600), ing('i2', 'mrkev', 600)]) }));
+  const r = await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, grams: 300 });
+  assert.equal(r.amount.kind === 'grams' && r.amount.of, 1200);
+});
+
+test('a selected ingredient without a readable amount stops the whole write', async () => {
+  serve(routes({ form: form({}, [ing('i1', 'okurka', 100), ing('i2', 'mrkev', 100, { count: null, countOriginal: null })]) }));
+  await assert.rejects(client().logMeal({ mealId: MEAL, meal: '1', date: PAST, percent: 50 }), /no amount for mrkev/);
+  assert.deepEqual(writes(), []);
+});
+
+test('the original unit is restored with the original count, as the site\'s dialog does', async () => {
+  serve(routes({ form: form({}, [ing('i1', 'okurka', 2, { selectedUnitGuid: 'changed', selectedUnitGuidOriginal: 'piece' }), ing('i2', 'mrkev', 100)]) }));
+  await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, percent: 50 });
+  assert.deepEqual(posted().foodstuff.map(i => [i['count'], i['selectedUnitGuid']]), [[1, 'piece'], [50, '0000000000000001']]);
+});
+
+test('a line with the same title that was already in the diary is not taken for the new one', async () => {
+  serve(
+    routes().map(([m, h]) =>
+      typeof m !== 'string' && String(m).includes('diary')
+        ? ([m, (url: URL) => json(envelope(dayPayload(/\/user\/diary\/(\d{2}\.\d{2}\.\d{4})\/get/.exec(url.pathname)![1]!, { meals: { '1': [{ id: 'old000000001', type: 'foodstuff', title: 'Test bábovka', unit: '100 g', energy: '10', energyUnit: 'kcal', isRecipe: true, guidUserMeal: MEAL }, ...(state.bodies.some(b => b.path === '/user/meal/add') ? [{ id: 'newline00001', type: 'foodstuff', title: 'Test bábovka', unit: '100 g', energy: '200', energyUnit: 'kcal', isRecipe: true, guidUserMeal: MEAL }] : [])] } })))] as Route)
+        : ([m, h] as Route),
+    ),
+  );
+  const r = await client().logMeal({ mealId: MEAL, meal: '1', date: PAST, percent: 50 });
+  assert.equal(r.added?.id, 'newline00001');
+});
+
+test('if the diary cannot be read before the write, the write still goes ahead and the new line is simply not identified', async () => {
+  serve(routes().map(([m, h]) => (typeof m !== 'string' && String(m).includes('diary') ? ([m, () => new Response('<html>down</html>')] as Route) : ([m, h] as Route))));
+  const r = await client().logMeal({ mealId: MEAL, meal: '1', date: PAST });
+  assert.equal(writes().some(b => b.path === '/user/meal/add'), true);
+  assert.equal(r.added, null);
 });

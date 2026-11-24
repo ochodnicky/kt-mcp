@@ -403,6 +403,7 @@ export interface LoggedMeal {
   /** The whole recipe's energy times the factor, for comparing with the line the site wrote. */
   expectedEnergy: number | null;
   wholeRecipeEnergy: number | null;
+  wholeRecipeEnergyUnit: string | null;
 }
 
 export type DayOutcome =
@@ -1654,7 +1655,7 @@ export class KtClient {
     for (const [name, v] of [['portions', args.portions], ['grams', args.grams], ['percent', args.percent]] as const) {
       if (v !== undefined && (!Number.isFinite(v) || v <= 0)) throw new KtError(`${name} must be a number above 0`);
     }
-    const id = assertEntryId(args.mealId);
+    const id = assertHexId(args.mealId, 'recipe id', 'use an id from list_my_meals');
     const form = await this.authed(`/user/meal/add/form/${id}?format=json`);
     if (!isRecord(form) || typeof form['guid'] !== 'string' || !Array.isArray(form['foodstuff']) || form['foodstuff'].length === 0) {
       throw new KtError(`log meal: unknown recipe id ${id}`);
@@ -1671,8 +1672,18 @@ export class KtClient {
       factor = args.portions / max;
       amount = { kind: 'portions', value: args.portions, of: max };
     } else if (args.grams !== undefined) {
-      const total = ingredients.filter(i => i['selected'] !== false).reduce((sum, i) => sum + (parseCzechNumber(i['weight']) ?? 0), 0);
-      if (total <= 0) throw new KtError(`"${title}": the site gives no weight for its ingredients, so grams cannot be worked out. Use portions or percent.`);
+      // The site's own dialog divides by the summed weight of the selected ingredients; so does this. A missing weight
+      // would make the share wrong without any sign, so it is refused, and so is a sum far from the recipe's stated weight.
+      const chosen = ingredients.filter(i => i['selected'] !== false);
+      const missing = chosen.filter(i => (parseCzechNumber(i['weight']) ?? 0) <= 0);
+      if (missing.length > 0) {
+        throw new KtError(`"${title}": the site gives no weight for ${missing.map(i => String(i['title'])).join(', ')}, so grams cannot be worked out. Use portions or percent.`);
+      }
+      const total = chosen.reduce((sum, i) => sum + (parseCzechNumber(i['weight']) ?? 0), 0);
+      const stated = parseCzechNumber(form['totalWeight']);
+      if (stated !== null && stated > 0 && Math.abs(total - stated) / stated > 0.02) {
+        throw new KtError(`"${title}": the ingredient weights add up to ${Math.round(total)} g but the site states ${Math.round(stated)} g for the recipe, so grams are ambiguous. Use portions or percent.`);
+      }
       factor = args.grams / total;
       amount = { kind: 'grams', value: args.grams, of: Math.round(total) };
     } else if (args.percent !== undefined) {
@@ -1689,23 +1700,34 @@ export class KtClient {
     } else {
       payload['dontSendUnit'] = true;
       payload['foodstuff'] = ingredients.map(i => {
+        if (i['selected'] === false) return i;
         const base = parseCzechNumber(i['countOriginal']) ?? parseCzechNumber(i['count']);
-        if (i['selected'] === false || base === null) return i;
-        return { ...i, count: Math.round(base * factor * 10_000) / 10_000 };
+        if (base === null) throw new KtError(`"${title}": the site gives no amount for ${String(i['title'])}, so the recipe cannot be scaled.`);
+        // Like the dialog, scale from the original unit: the original count only means something in the original unit.
+        const unit = typeof i['selectedUnitGuidOriginal'] === 'string' ? { selectedUnitGuid: i['selectedUnitGuidOriginal'] } : {};
+        return { ...i, ...unit, count: Math.round(base * factor * 10_000) / 10_000 };
       });
     }
 
-    const before = new Set((await this.getDayEntries(date, { fresh: true })).meals.flatMap(m => m.entries.map(e => e.id)));
+    // Read before the write only to recognise the new line afterwards; if that read fails the write still goes ahead.
+    const before = await this.getDayEntries(date, { fresh: true }).then(
+      d => new Set(d.meals.flatMap(m => m.entries.map(e => e.id))),
+      () => null,
+    );
     try {
       await this.authed('/user/meal/add?format=json&=', { method: 'POST', body: payload });
     } finally {
       this.invalidate();
     }
-    const added = await this.getDayEntries(date, { fresh: true }).then(
-      d => d.meals.flatMap(m => m.entries).filter(e => !before.has(e.id) && e.title === title),
-      () => [] as DiaryEntry[],
-    );
-    const whole = (await this.listMeals().catch(() => [] as MealSummary[])).find(m => m.id === id)?.energy ?? null;
+    const added =
+      before === null
+        ? []
+        : await this.getDayEntries(date, { fresh: true }).then(
+            d => d.meals.flatMap(m => m.entries).filter(e => !before.has(e.id) && e.title === title),
+            () => [] as DiaryEntry[],
+          );
+    const wholeMeal = (await this.listMeals().catch(() => [] as MealSummary[])).find(m => m.id === id);
+    const whole = wholeMeal?.energy ?? null;
     return {
       date,
       recipe: title,
@@ -1714,6 +1736,7 @@ export class KtClient {
       added: added.length === 1 ? added[0]! : null,
       expectedEnergy: whole === null ? null : Math.round(whole * factor * 10) / 10,
       wholeRecipeEnergy: whole,
+      wholeRecipeEnergyUnit: wholeMeal?.energyUnit ?? null,
     };
   }
 

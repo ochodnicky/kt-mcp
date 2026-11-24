@@ -153,7 +153,7 @@ test('the tools that edit or log say what they change, and the recipe tools are 
 
 test('log_meal passes the amount on, and calls the energy a match only when the written line is close to the expected share', async () => {
   const entry = (energy: number) => ({ id: 'newline00001', title: 'Test bábovka', kind: 'recipe' as const, quantity: { raw: '100 g', count: null, label: null, unitSize: null, unitSizeUnit: null, total: 100, totalUnit: 'g' as const }, energy, energyUnit: 'kcal', nutrients: { protein: null, carbohydrate: null, fat: null, fibre: null, sugar: null, saturatedFat: null, salt: null, calcium: null, cholesterol: null, sodium: null, transFat: null, monounsaturatedFat: null, polyunsaturatedFat: null, alcohol: null } });
-  const result = (e: number | null) => ({ date: '10.11.2026', recipe: 'Test bábovka', amount: { kind: 'portions' as const, value: 1, of: 14 }, factor: 1 / 14, added: e === null ? null : entry(e), expectedEnergy: 211.6, wholeRecipeEnergy: 2962 });
+  const result = (e: number | null) => ({ date: '10.11.2026', recipe: 'Test bábovka', amount: { kind: 'portions' as const, value: 1, of: 14 }, factor: 1 / 14, added: e === null ? null : entry(e), expectedEnergy: 211.6, wholeRecipeEnergy: 2962, wholeRecipeEnergyUnit: 'kcal' });
   let asked: unknown;
   const ok = register({ logMeal: async (a: unknown) => ((asked = a), result(212)) });
   const good = await call(ok, 'log_meal', { meal_id: 'a'.repeat(32), meal: '1', portions: 1 });
@@ -167,4 +167,20 @@ test('log_meal passes the amount on, and calls the energy a match only when the 
   const lost = await call(none, 'log_meal', { meal_id: 'a'.repeat(32), meal: '1', portions: 1 });
   assert.deepEqual([lost.json.energy_matches, lost.json.entry], [null, null]);
   assert.match(lost.json.note, /could not be identified/);
+});
+
+test('the energy comparison is skipped when it cannot be made, and a zero line never matches a real share', async () => {
+  const base = { date: '10.11.2026', recipe: 'Test', amount: { kind: 'percent' as const, value: 10 }, factor: 0.1 };
+  const line = (energy: number, unit = 'kcal') => ({ id: 'newline00001', title: 'Test', kind: 'recipe' as const, quantity: { raw: null, count: null, label: null, unitSize: null, unitSizeUnit: null, total: null, totalUnit: null }, energy, energyUnit: unit, nutrients: { protein: null, carbohydrate: null, fat: null, fibre: null, sugar: null, saturatedFat: null, salt: null, calcium: null, cholesterol: null, sodium: null, transFat: null, monounsaturatedFat: null, polyunsaturatedFat: null, alcohol: null } });
+  const run = async (r: object) => (await call(register({ logMeal: async () => r as never }), 'log_meal', { meal_id: 'a'.repeat(32), meal: '1', percent: 10 })).json;
+  const noList = await run({ ...base, added: line(30), expectedEnergy: null, wholeRecipeEnergy: null, wholeRecipeEnergyUnit: null });
+  assert.deepEqual([noList.energy_matches, /could not be compared/.test(noList.note)], [null, true]);
+  const units = await run({ ...base, added: line(30, 'kj'), expectedEnergy: 30, wholeRecipeEnergy: 300, wholeRecipeEnergyUnit: 'kcal' });
+  assert.equal(units.energy_matches, null);
+  const zero = await run({ ...base, added: line(0), expectedEnergy: 2, wholeRecipeEnergy: 20, wholeRecipeEnergyUnit: 'kcal' });
+  assert.equal(zero.energy_matches, false);
+  const edgeOk = await run({ ...base, added: line(32), expectedEnergy: 30, wholeRecipeEnergy: 300, wholeRecipeEnergyUnit: 'kcal' });
+  assert.equal(edgeOk.energy_matches, true);
+  const edgeBad = await run({ ...base, added: line(33), expectedEnergy: 30, wholeRecipeEnergy: 300, wholeRecipeEnergyUnit: 'kcal' });
+  assert.equal(edgeBad.energy_matches, false);
 });
