@@ -195,3 +195,14 @@ export function profileForm(over: Record<string, unknown> = {}) {
     ...over,
   };
 }
+
+/** The nutrient figures beyond the basic seven, all unknown. Spread into a hand-built DiaryEntry's nutrients. */
+export const NO_EXTRA_NUTRIENTS = {
+  calcium: null,
+  cholesterol: null,
+  sodium: null,
+  transFat: null,
+  monounsaturatedFat: null,
+  polyunsaturatedFat: null,
+  alcohol: null,
+};

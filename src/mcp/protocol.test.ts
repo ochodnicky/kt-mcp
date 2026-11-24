@@ -31,6 +31,11 @@ const EXPECTED_TOOLS = [
   'search_activity', 'log_activity', 'delete_activity', 'add_diary_note', 'delete_diary_note',
   'copy_meal', 'copy_day', 'export_diary_csv',
   'get_goals', 'update_goals', 'get_energy_model',
+  'get_hydration', 'get_goal_analysis', 'list_tracked_measurements', 'add_tracked_measurement', 'delete_tracked_measurement',
+  'move_diary_entry', 'search_recipes', 'get_recipe',
+  'list_favorite_activities', 'add_favorite_activity', 'remove_favorite_activity', 'list_regular_activities', 'add_regular_activity', 'delete_regular_activity',
+  'update_activity', 'list_day_templates', 'get_day_template', 'save_day_as_template', 'apply_day_template', 'delete_day_template',
+  'list_common_activities', 'log_custom_food', 'log_custom_activity', 'update_meal', 'change_meal_ingredients',
 ];
 
 test('the SDK lists every tool, old and new, each with a description and an input schema', async () => {
@@ -49,6 +54,32 @@ test('the SDK lists every tool, old and new, each with a description and an inpu
   assert.equal(byName.get('get_day_balance')?.inputSchema.required, undefined);
   assert.equal(byName.get('delete_diary_entry')?.annotations?.destructiveHint, true);
   assert.equal(byName.get('get_nutrient_ranking')?.annotations?.readOnlyHint, true);
+  assert.deepEqual(byName.get('get_hydration')?.inputSchema.required?.sort(), ['from', 'to']);
+  assert.deepEqual(byName.get('get_goal_analysis')?.inputSchema.required?.sort(), ['from', 'to']);
+  assert.deepEqual(byName.get('add_tracked_measurement')?.inputSchema.required?.sort(), ['measurement', 'value']);
+  assert.deepEqual(byName.get('delete_tracked_measurement')?.inputSchema.required, ['measurement_id']);
+  assert.deepEqual(byName.get('move_diary_entry')?.inputSchema.required?.sort(), ['date', 'entry_id']);
+  assert.deepEqual(byName.get('get_recipe')?.inputSchema.required, ['recipe_id']);
+  assert.equal(byName.get('search_recipes')?.inputSchema.required, undefined);
+  for (const name of ['get_hydration', 'get_goal_analysis', 'list_tracked_measurements', 'search_recipes', 'get_recipe']) {
+    assert.equal(byName.get(name)?.annotations?.readOnlyHint, true, name);
+  }
+  for (const name of ['add_tracked_measurement', 'delete_tracked_measurement', 'move_diary_entry']) {
+    assert.equal(byName.get(name)?.annotations?.readOnlyHint, false, name);
+  }
+  assert.equal(byName.get('delete_tracked_measurement')?.annotations?.destructiveHint, true);
+  assert.deepEqual(byName.get('add_regular_activity')?.inputSchema.required?.sort(), ['activity_id', 'minutes', 'weekdays']);
+  assert.deepEqual(byName.get('update_activity')?.inputSchema.required?.sort(), ['activity_id', 'date', 'minutes']);
+  assert.deepEqual(byName.get('apply_day_template')?.inputSchema.required?.sort(), ['dates', 'template_id']);
+  assert.deepEqual(byName.get('save_day_as_template')?.inputSchema.required?.sort(), ['date', 'title']);
+  assert.deepEqual(byName.get('log_custom_food')?.inputSchema.required?.sort(), ['energy', 'meal', 'title']);
+  assert.deepEqual(byName.get('log_custom_activity')?.inputSchema.required?.sort(), ['energy', 'minutes', 'title']);
+  assert.deepEqual(byName.get('update_meal')?.inputSchema.required, ['meal_id']);
+  assert.deepEqual(byName.get('change_meal_ingredients')?.inputSchema.required, ['meal_id']);
+  assert.equal(byName.get('list_common_activities')?.annotations?.readOnlyHint, true);
+  for (const name of ['list_favorite_activities', 'list_regular_activities', 'list_day_templates']) {
+    assert.equal(byName.get(name)?.annotations?.readOnlyHint, true, name);
+  }
 });
 
 test('arguments are validated by the SDK before a handler runs', async () => {
@@ -110,4 +141,42 @@ test('the SDK lists and serves the prompts', async () => {
   const first = review.messages[0]?.content;
   assert.equal(first?.type, 'text');
   assert.match(first?.type === 'text' ? first.text : '', /03\.11\.2026–09\.11\.2026/);
+});
+
+test('a duration below one minute is refused by the schema before an activity or the routine is touched', async () => {
+  let called = 0;
+  const client = await connect({
+    addRegularActivity: async () => ((called += 1), { added: [] }),
+    updateActivity: async () => ((called += 1), {}),
+  } as unknown as Partial<KtClient>);
+  for (const [name, args] of [
+    ['add_regular_activity', { activity_id: 'a', weekdays: ['monday'], minutes: 0.001 }],
+    ['update_activity', { date: '10.11.2026', activity_id: 'act000000001', minutes: 0.5 }],
+  ] as const) {
+    const r = await client.callTool({ name, arguments: args }).catch(e => e);
+    assert.ok(r instanceof Error || (r as { isError?: boolean }).isError, name);
+  }
+  assert.equal(called, 0);
+});
+
+test('values the schema cannot accept never reach the custom-item and recipe-edit handlers', async () => {
+  let called = 0;
+  const bump = async () => ((called += 1), {});
+  const client = await connect({ logCustomFood: bump, logCustomActivity: bump, updateMeal: bump, changeMealIngredients: bump } as unknown as Partial<KtClient>);
+  for (const [name, args] of [
+    ['log_custom_food', { title: 'x', energy: -1, meal: '1' }],
+    ['log_custom_food', { title: 'x', energy: 100, meal: '9' }],
+    ['log_custom_food', { title: 'x', energy: 100, meal: '1', protein: -2 }],
+    ['log_custom_food', { title: '', energy: 100, meal: '1' }],
+    ['log_custom_food', { title: 'x', energy: 100, meal: '1', energy_unit: 'btu' }],
+    ['log_custom_activity', { title: 'x', minutes: 30, energy: 10, energy_unit: 'joule' }],
+    ['log_custom_activity', { title: 'x', minutes: 0.2, energy: 10 }],
+    ['update_meal', { meal_id: 'a', portions: 0 }],
+    ['update_meal', { meal_id: 'a', steps: Array.from({ length: 51 }, () => 'x') }],
+    ['change_meal_ingredients', { meal_id: 'a', add: [{ food_id: 'f', amount: 0 }] }],
+  ] as const) {
+    const r = await client.callTool({ name, arguments: args }).catch(e => e);
+    assert.ok(r instanceof Error || (r as { isError?: boolean }).isError, `${name} ${JSON.stringify(args)}`);
+  }
+  assert.equal(called, 0);
 });

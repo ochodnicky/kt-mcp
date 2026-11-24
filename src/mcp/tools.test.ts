@@ -3,6 +3,7 @@
  * server and a fake client. Fixture data is synthetic (see kt/diary.test.ts).
  */
 
+import { NO_EXTRA_NUTRIENTS } from '../kt/testkit.js';
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -50,7 +51,7 @@ const day = (date: string, entryCount: number): DiaryDay => ({
               quantity: { raw: '200 g', count: null, label: null, unitSize: null, unitSizeUnit: null, total: 200, totalUnit: 'g' },
               energy: 130,
               energyUnit: 'kcal',
-              nutrients: { protein: 22, carbohydrate: null, fat: 0, fibre: null, sugar: null, saturatedFat: null, salt: null },
+              nutrients: { protein: 22, carbohydrate: null, fat: 0, fibre: null, sugar: null, saturatedFat: null, salt: null, ...NO_EXTRA_NUTRIENTS },
             },
           ]
         : [],

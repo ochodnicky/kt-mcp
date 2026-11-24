@@ -32,3 +32,15 @@ export function shiftDate(date: string, days: number): string {
   const d = new Date(Date.UTC(yyyy, mm - 1, dd + days));
   return `${String(d.getUTCDate()).padStart(2, '0')}.${String(d.getUTCMonth() + 1).padStart(2, '0')}.${d.getUTCFullYear()}`;
 }
+
+/** An instant as the dd.MM.yyyy date on the Czech wall clock. */
+export function pragueDate(instant: Date): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Europe/Prague',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  }).formatToParts(instant);
+  const get = (type: string) => parts.find(p => p.type === type)?.value ?? '';
+  return `${get('day')}.${get('month')}.${get('year')}`;
+}

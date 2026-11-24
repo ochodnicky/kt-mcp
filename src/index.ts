@@ -91,7 +91,11 @@ app.post('/mcp', requireAuth, async (req, res) => {
         'When they say "my favourite ..." or "my usual ...", call list_favorite_foods first. ' +
         'For questions about what they ate, use get_day_entries / get_diary_range / get_nutrient_ranking; for trends, get_balance_range and get_weight_history. ' +
         'For goals, deficit, basal metabolism or macros, call get_goals first; when the weight is not moving as expected, use get_energy_model. update_goals changes the user\'s real settings: explain the change and get agreement before calling it. ' +
-        'Tools that change the diary (log_*, update_*, delete_*, copy_*, add_*) write to their real diary: confirm first when anything is ambiguous, and never retry a write blindly.',
+        'For "how am I doing against my goals" use get_goal_analysis (the site\'s own averages, top sources and tips); for drinking use get_hydration; body measurements such as waist and body fat are list_tracked_measurements / add_tracked_measurement. ' +
+        'Favourite activities, the weekly routine (add_regular_activity is a standing change: confirm weekdays and duration) and saved day templates (apply_day_template adds to a day, so it can duplicate) have their own tools; update_activity changes a logged activity\'s duration. '+
+        'For a food or activity that is not in the database use log_custom_food / log_custom_activity (one-off lines; prefer the database entry when there is one). Saved recipes can be edited with update_meal and change_meal_ingredients. '+
+        'To put a logged line under another meal or day use move_diary_entry; search_recipes / get_recipe read the public recipe catalogue, which is not the user\'s own saved meals. ' +
+        'Tools that change the diary (log_*, update_*, delete_*, copy_*, move_*, add_*) write to their real diary: confirm first when anything is ambiguous, and never retry a write blindly.',
     },
   );
   registerTools(server, kt);

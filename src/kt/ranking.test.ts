@@ -1,5 +1,6 @@
 /** Ranking tests. All data is synthetic. */
 
+import { NO_EXTRA_NUTRIENTS } from './testkit.js';
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { KtError, parseQuantity, type DayOutcome, type DiaryEntry } from './client.js';
@@ -14,7 +15,7 @@ function entry(title: string, over: Partial<DiaryEntry> & { protein?: number | n
     quantity: parseQuantity(raw),
     energy: 100,
     energyUnit: 'kcal',
-    nutrients: { protein, carbohydrate: null, fat: 1, fibre: null, sugar: null, saturatedFat: null, salt: null },
+    nutrients: { protein, carbohydrate: null, fat: 1, fibre: null, sugar: null, saturatedFat: null, salt: null, ...NO_EXTRA_NUTRIENTS },
     ...rest,
   };
 }

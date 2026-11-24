@@ -1,5 +1,6 @@
 /** Tests for the CSV export and the balance averages. Synthetic data. */
 
+import { NO_EXTRA_NUTRIENTS } from './testkit.js';
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { parseQuantity, type BalanceOutcome, type DayBalance, type DayOutcome, type DiaryEntry } from './client.js';
@@ -14,7 +15,7 @@ function entry(title: string, over: Partial<DiaryEntry> = {}): DiaryEntry {
     quantity: parseQuantity('100 g'),
     energy: 100,
     energyUnit: 'kcal',
-    nutrients: { protein: 10, carbohydrate: null, fat: 0, fibre: null, sugar: null, saturatedFat: null, salt: 0.5 },
+    nutrients: { protein: 10, carbohydrate: null, fat: 0, fibre: null, sugar: null, saturatedFat: null, salt: 0.5, ...NO_EXTRA_NUTRIENTS },
     ...over,
   };
 }

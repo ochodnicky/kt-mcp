@@ -47,6 +47,14 @@ Once connected, food logging stops being a chore of tapping through search scree
 
 - **Work out why your weight is stuck.** "My weight isn't moving, find out why and suggest changes to my goals." The agent reads your goals (`get_goals`), estimates from your diary and weight trend what your body really spends and compares it with what the site assumes (`get_energy_model`). It then proposes a concrete change (activity level, own basal, macros) and **writes it only after you agree** (`update_goals`). The `plateau_review` prompt does this in one go.
 
+- **Track more than weight.** "Record my waist as 94 cm." "How are my waist and body fat % changing?" When the scale stands still but the waist goes down, fat is being lost even if the weight does not show it. `plateau_review` looks at the measurements by itself.
+
+- **Ask the site for its own analysis.** "How am I meeting my goals over the last 14 days?" `get_goal_analysis` returns averages against goals, the biggest sources of protein or fat and the tips the site derived. The same goes for whether you drink enough (`get_hydration`).
+
+- **Find a recipe by the numbers.** "Find a dinner under 500 kcal per portion with at least 35 g of protein in 30 minutes." `search_recipes` searches the public recipes, `get_recipe` shows the ingredients, steps and nutrition per portion.
+
+- **Fix where you logged something.** "That quark belongs to breakfast, not lunch." `move_diary_entry` moves the line, with no delete and re-log.
+
 - **Get the data into a spreadsheet.** "Export the last 30 days as CSV." Paste the result into Excel or Google Sheets.
 
 ## Tools
@@ -63,6 +71,7 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 | `log_food` ✏️ | Write an eating record into the diary. |
 | `list_favorite_foods` | Favourite foods, optionally filtered by name (accents and case ignored). The id works with `get_food_portions` and `log_food`. Read-only. |
 | `list_common_foods` | The foods you log most often. Read-only. |
+| `log_custom_food` ✏️ | Log a food **you describe yourself** with a name and energy (a restaurant dish, a value off a label), optionally with grams of nutrients. It is a one-off line: it is not added to the database or the favourites and cannot be searched later. Energy is in kcal; if your diary works in kJ the tool refuses a kcal figure and says which unit to use, so kcal is never stored as kJ. If the food exists in the database, use `search_food` and `log_food`. |
 | `add_favorite_food` ✏️ / `remove_favorite_food` ✏️ | Mark / unmark a food as a favourite and confirm the result. Touches no entries. |
 
 ### What I ate (reading)
@@ -70,9 +79,9 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 | Tool | Purpose |
 |---|---|
 | `get_day_summary` | The site's raw day totals, goals and weekly charts, passed through. Contains no individual entries. |
-| `get_day_entries` | The individual entries logged on one day (foods and saved recipes), grouped by meal: name, logged quantity and nutrients; plus the day's activities and notes. Each entry carries an `entry_id`, each activity an `activity_id`, each note a `note_id`. |
+| `get_day_entries` | The individual entries logged on one day (foods and saved recipes), grouped by meal: name, logged quantity and nutrients (including calcium, sodium and cholesterol in mg, trans and unsaturated fats and alcohol; an unknown value is `null`, not 0); plus the day's activities and notes. Each entry carries an `entry_id`, each activity an `activity_id`, each note a `note_id`. |
 | `get_diary_range` | The same for a range of days `from`–`to` (both end days included, at most **14** days). Each day is reported as filled, empty or failed to load. |
-| `get_nutrient_ranking` | Rank foods by the summed amount of one nutrient (protein, energy, carbohydrate, fat, fibre, sugar, saturated fat, salt) over up to **90** days. |
+| `get_nutrient_ranking` | Rank foods by the summed amount of one nutrient (protein, energy, carbohydrate, fat, fibre, sugar, saturated fat, trans fat, salt, sodium, cholesterol, calcium, alcohol) over up to **90** days. |
 | `get_day_balance` | The site's balance for one day: intake against the goal, energy spent (basal + activity), net balance, and goal-vs-actual for protein, carbohydrate, fat and more, each with its unit. |
 | `get_balance_range` | The same over up to **90** days, with averages (over days where something was logged) and the number of days loaded and failed. |
 | `get_weight_history` | Recorded weights for the month around a day, plus current and target weight. |
@@ -83,6 +92,7 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 | Tool | Purpose |
 |---|---|
 | `update_diary_entry` ✏️ | Change the logged quantity (and optionally the unit) of one entry. The site cannot edit entries logged from a saved recipe. |
+| `move_diary_entry` ✏️ | Move a line to another meal of the same day, to another day, or both (like dragging it on the site). The quantity does not change. The result is read back and says where the line landed. |
 | `delete_diary_entry` ✏️ | Delete one entry. It first checks the entry is on that day, then re-reads the day and confirms it is gone. |
 | `copy_meal` ✏️ | Copy a whole meal (e.g. yesterday's lunch) onto another day, optionally into a different meal. **Not idempotent** — a second call creates duplicates. |
 | `copy_day` ✏️ | Copy every meal of a day, meal by meal into the same slots (activities and notes are not copied). On a failure it stops and says what was already copied. Not idempotent. |
@@ -92,6 +102,23 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 | `add_diary_note` ✏️ / `delete_diary_note` ✏️ | Add a note to a whole day or to one meal / delete it. |
 | `log_weight` ✏️ | Record a body weight. The site keeps one value per date, so it replaces any existing one. |
 
+### Favourite and regular activities, day templates
+
+| Tool | Purpose |
+|---|---|
+| `list_favorite_activities` | Favourite activities with kcal per kg per minute and kcal per minute for your current weight. The `activity_id` works with `log_activity`. Read-only. |
+| `list_common_activities` | The activities you log most often. Read-only. The site's list stays empty until use fills it; the shape of a non-empty list could not be checked during development. |
+| `log_custom_activity` ✏️ | Log an activity **you describe yourself** with a name, a duration in minutes and the energy burned (a class, a match). One-off, not added to the catalogue. The same energy-unit check as for a custom food. If the activity exists in the catalogue, use `search_activity` and `log_activity`, where the site computes the energy from your weight. |
+| `add_favorite_activity` ✏️ / `remove_favorite_activity` ✏️ | Add an activity to the favourites or remove it, and confirm the result. Diary entries are untouched. |
+| `list_regular_activities` | The weekly routine: activities the site repeats on chosen weekdays. Each weekday has its own `regular_activity_id`. Read-only. |
+| `add_regular_activity` ✏️ | Add an activity to the weekly routine on chosen weekdays (in minutes). This is a **standing change**: the site counts it on those weekdays from now on, so it changes the energy picture of every such day. With a flat activity allowance set (activity level above sedentary) it can count twice. The same activity is not added twice on a weekday. |
+| `delete_regular_activity` ✏️ | Delete one weekday of the routine. It only accepts an id the site has just listed. Activities already logged in the diary are untouched. |
+| `update_activity` ✏️ | Change the duration of a logged activity (in minutes); the site recomputes the energy. Activities measured in hours only. Activities synced from a watch or phone usually cannot be edited. |
+| `list_day_templates` / `get_day_template` | Saved day templates ("My diaries") and their contents per meal, with notes. Read-only. |
+| `save_day_as_template` ✏️ | Save the foods of a chosen day as a new template (optionally with its notes). Activities cannot be saved in a template. A second call makes a second template. |
+| `apply_day_template` ✏️ | Write a template into 1–7 days. Lines are **added** to the day, so using it twice, or on a day that already has food, duplicates them. The result compares the number of entries of each day before and after. |
+| `delete_day_template` ✏️ | Delete a saved template. Days it was written to earlier are untouched. |
+
 ### Goals and energy estimate
 
 | Tool | Purpose |
@@ -99,6 +126,16 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 | `get_goals` | Goal (lose / maintain / gain), weight and target weight, activity level, basal metabolism and daily energy goal (the site's calculation and the user's own override), nutrient goals in grams and %, and the drinking goal. `in_use_today` shows what the diary really applies today. Warnings flag things such as macros that do not add up to the energy goal. Reads a fixed set of fields only; e-mail, password, agreements and tokens are never returned. |
 | `update_goals` ✏️ | Change the goal, target weight, activity level (1; 1.2; 1.375; 1.55; 1.725; 1.9), own basal, own energy goal, nutrient goals (grams, or % for protein, carbohydrate and fat together) and the drinking goal. Only the fields passed change; `null` clears an own value. Returns before, after, what the site did not take and warnings. It never touches weight, e-mail or password. |
 | `get_energy_model` (`weeks`, `to`) | Estimates what the body really spends: average intake plus the energy released by the weight trend (1 kg ≈ 7,700 kcal), set against the expenditure the site assumes. Returns the margin, a confidence (`low` / `medium` / `high`) and caveats. Today is not counted. |
+
+### Statistics and measurements
+
+| Tool | Purpose |
+|---|---|
+| `get_goal_analysis` (`from`, `to`, `meal`, `top_sources`) | The site's own diary analysis over up to **366** days: average daily intake against the goal for energy, protein, carbohydrate, fat (and its saturated part), fibre, salt, calcium and drinking, the biggest sources of each nutrient (foods and food groups) and the personal tips the site derived ("too little protein 3 days in a row"). `meal` narrows it to one meal. Read-only. |
+| `get_hydration` (`from`, `to`) | Litres drunk per day against the day's goal (which grows with activity), with averages. A day with 0 l may just be an unlogged day, so averages are given both over all days and over days with something logged. Drinks are logged as ordinary foods (`log_food`). Read-only. |
+| `list_tracked_measurements` (`from`, `to`) | The measurements tracked besides weight: waist, hips, abdomen, neck, arm, thigh, calf, forearm, chest (upper and lower), body fat %, muscle %, water %, visceral fat. Values with a `measurement_id`, the change over the period and the kinds that can be started. Read-only. |
+| `add_tracked_measurement` ✏️ | Record a measured value. The site keeps one value per measurement and date, so a second write for the same day **replaces** the first. A measurement that is not tracked yet is started with the value for **today** (the site's form has no date), so a past date is refused for it. |
+| `delete_tracked_measurement` ✏️ | Delete one value. It only accepts a `measurement_id` from `list_tracked_measurements`, so a weight record is never touched (the site deletes weights through the same route). Deleting a whole tracker with all its values is deliberately not possible. |
 
 ### Recipes
 
@@ -109,6 +146,17 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 | `get_meal_details` | A saved recipe's ingredients with amounts and nutrition, plus totals for the whole recipe (not per portion). |
 | `log_meal` ✏️ | Log a whole saved recipe into the diary as one entry. |
 | `delete_meal` ✏️ | Delete a saved recipe. |
+| `update_meal` ✏️ | Rename a saved recipe, set its portion count and replace its preparation steps. Ingredients are untouched. The result is read back. |
+| `change_meal_ingredients` ✏️ | Add, change or remove the ingredients of a saved recipe by food id; the site recomputes the nutrition. A food that is in the recipe more than once is refused (it is unclear which line is meant), so is adding a food that is already in it (use a change of amount), and a recipe must keep at least one ingredient. A change without a unit keeps the line's unit. Lines already logged from the recipe are not changed. |
+
+### Public recipes
+
+Recipes published by other users at `kaloricketabulky.cz/recepty`. These are not your saved recipes (that is `list_my_meals`).
+
+| Tool | Purpose |
+|---|---|
+| `search_recipes` (`query`, `tags`, `sort`, `nutrient`, `min`, `max`, `max_preparation_minutes`, `page`, `limit`) | Search by name, tags (dinner, vegan, lactose-free, …), a range of one nutrient per 100 g and preparation time. Sorted by rating, newest or most used. Returns figures **per 100 g**, the total number of matches and the list of tags. Read-only. |
+| `get_recipe` | One recipe: ingredients with amounts, steps, tags, preparation time, rating and nutrition for the whole recipe, per portion (only when the author gave a portion count) and per 100 g. It logs nothing; to eat it, use `log_food`, or save it with `create_meal`. Read-only. |
 
 ### Prompts
 
@@ -162,6 +210,31 @@ Clients that support MCP prompts offer these as ready-made shortcuts:
 | "Remove my own basal and go back to the site's calculation." | `get_goals` → `update_goals` (`null` clears an own value) |
 | "Log my favourite oatmeal for breakfast." | the `log_favorite` prompt |
 | "Show the raw daily totals and weekly charts as the site sends them." | `get_day_summary` |
+| "How am I doing against my goals over the last 14 days, and what does the site advise?" | `get_goal_analysis` |
+| "Where does most of my salt come from?" | `get_goal_analysis` (sources) or `get_nutrient_ranking` with `sodium` |
+| "How much did I drink this week?" | `get_hydration` |
+| "How much alcohol did I drink this month, and from what?" | `get_nutrient_ranking` with `alcohol` |
+| "Record my waist as 94 cm." | `list_tracked_measurements` → `add_tracked_measurement` |
+| "How are my waist and body fat % changing?" | `list_tracked_measurements` |
+| "Delete yesterday's waist value." | `list_tracked_measurements` → `delete_tracked_measurement` (after confirmation) |
+| "That quark belongs to breakfast, not lunch." | `get_day_entries` → `move_diary_entry` |
+| "Move dinner from today to tomorrow." | `get_day_entries` → `move_diary_entry` with `to_date` |
+| "Find a dinner under 500 kcal per 100 g with at least 10 g of protein." | `search_recipes` |
+| "How is that recipe made, and how many kcal per portion?" | `get_recipe` |
+| "What do I usually exercise?" | `list_common_activities` |
+| "I had a schnitzel with potatoes in a restaurant, about 900 kcal and 40 g of protein." | `log_custom_food` |
+| "Log an hour of dancing, my watch showed 380 kcal." | `log_custom_activity` |
+| "Rename that recipe to Quick soup and make it 4 portions." | `list_my_meals` → `update_meal` |
+| "In that soup use 200 g of celery instead of the carrot." | `list_my_meals` → `get_meal_details` → `change_meal_ingredients` |
+| "Log my favourite swim for 45 minutes." | `list_favorite_activities` → `log_activity` |
+| "Add swimming to my favourite activities." | `search_activity` → `add_favorite_activity` |
+| "Every Monday and Thursday I walk for 40 minutes." | `search_activity` → `add_regular_activity` (after confirmation) |
+| "What is in my weekly routine?" | `list_regular_activities` |
+| "Take the Monday swim out of my routine." | `list_regular_activities` → `delete_regular_activity` |
+| "That swim yesterday lasted 45 minutes, not 30." | `get_day_entries` → `update_activity` |
+| "Save today as a template called Usual day." | `save_day_as_template` |
+| "Write the template Usual day into tomorrow." | `list_day_templates` → `get_day_template` → `apply_day_template` |
+| "Delete the template Usual day." | `list_day_templates` → `delete_day_template` (after confirmation) |
 
 ### How writes are guarded
 
@@ -169,6 +242,9 @@ Clients that support MCP prompts offer these as ready-made shortcuts:
 - After a write the day is **re-read** and the result (`confirmed_gone`, `entries_added_to_target_day`, …) goes back to the agent. If only that follow-up read fails, the write is **not reported as an error**, so the agent doesn't repeat it; the result is `null` with a note to check it.
 - `update_goals` reads the profile fresh, changes only the fields passed and sends the rest of the form back as it came (the site saves the whole form at once). Out-of-range values and impossible combinations (for example percentages for only some macros, or a sum above 100) are refused before anything is sent. After the write the profile is read again and any field the site did not take is reported.
 - Every tool that takes a date rejects days that do not exist; the site silently rolls `31.02.2026` over to 3 March.
+- `delete_tracked_measurement` only takes the id of a value the site has just listed as a tracked measurement. The site deletes weights through the same route, so any other id is refused before anything is deleted. A new tracker is started with the value for today (the form has no date), so a past date is refused for it.
+- `add_regular_activity` and `apply_day_template` are deliberately marked as not idempotent and their descriptions tell the agent so. The routine refuses a duplicate on the same weekday, a template is written to at most 7 days at a time, and the result reports `applied` only when every day gained exactly the number of foods the template holds. `delete_regular_activity` and `delete_day_template` only take an id the site has just listed.
+- `move_diary_entry` first finds the line on the given day, moves it one step at a time (day, then meal) and reads the result back. If the line did not land where it should, `confirmed` is not `true`.
 - Copying and adding notes or activities is not idempotent. The tool descriptions tell the agent so, and a failed `copy_day` reports what was already copied.
 
 ### Limits and cache
@@ -178,6 +254,10 @@ Clients that support MCP prompts offer these as ready-made shortcuts:
 | `get_diary_range` | 14 days (returns every entry) |
 | `export_diary_csv` | 31 days |
 | `get_nutrient_ranking`, `get_balance_range` | 90 days (aggregates only) |
+| `get_goal_analysis`, `get_hydration` | 366 days (the site computes it, in one request) |
+| `list_tracked_measurements` | 3 years |
+| `search_recipes` | 25 recipes per page |
+| `apply_day_template` | 7 days per call |
 
 Days are fetched one at a time. Days that are over are **kept in memory for 5 minutes**, so a repeated query over a long range is fast (30 days: ~3 s → ~0.2 s). Today and the future are never cached, every write made through this server empties the cache, and the reads that verify a write bypass it. A change made outside this server (in the app) can therefore take up to 5 minutes to show in past days.
 
@@ -192,11 +272,13 @@ npm run smoke              # read-only
 npm run smoke -- --write   # also the write paths, see below
 ```
 
-With `--write`, every write happens on **tomorrow only**, which must be completely empty (the script stops otherwise). It logs and edits a food, adds notes and an activity, copies a meal — and deletes all of it again; it adds and removes a favourite food that was not one, and re-saves the latest weight with its own value. It also temporarily changes the drinking goal, an own basal and one carbohydrate goal, checks they show up in the diary's energy goal, puts them back and compares the whole goals block with its original state (including checking that saving the profile did not add a weigh-in). It ends by checking tomorrow is empty again. Today and earlier days are never modified. Exit code 1 means a check failed.
+With `--write`, every write happens on **tomorrow only**, which must be completely empty (the script stops otherwise). It logs and edits a food, adds notes and an activity, copies a meal — and deletes all of it again; it temporarily adds a test activity to the favourites and to the weekly routine (Saturday, Sunday) and changes the duration of a logged activity; it saves tomorrow as a template, writes it to the day after tomorrow and deletes it (everything is removed again); it starts a test "Obvod krku" (neck) tracker (only when you do not track it yet), records and deletes a value, and finally deletes the whole test tracker; it moves a test line to another meal and, if the day after tomorrow is empty too, to that day and back; it adds and removes a favourite food that was not one, and re-saves the latest weight with its own value. It also temporarily changes the drinking goal, an own basal and one carbohydrate goal, checks they show up in the diary's energy goal, puts them back and compares the whole goals block with its original state (including checking that saving the profile did not add a weigh-in). It ends by checking tomorrow is empty again. Today and earlier days are never modified. Exit code 1 means a check failed.
 
 ### Not implemented yet
 
-The site can do more than is offered here. Deliberately missing: editing a saved recipe or lines logged from one (the site handles them with an intricate form), custom foods and custom activities entered by hand, editing activities (only add and delete), logging litres drunk (setting the drinking goal works), tracked measurements (waist and so on), regular activities, e-mail, password and other account settings, sharing, day templates, and the site's native XLS/PDF export (`export_diary_csv` replaces it).
+The site can do more than is offered here. Deliberately missing: editing lines that were already logged from a recipe (the site cannot edit them; delete and log again), custom foods saved to the database and custom activities saved to the catalogue (they can only be logged as one-offs), activities inside a day template and scaling the portions when a template is written (the site did not take them in testing), the shape of a non-empty list of "most common activities" (it is read, but could not be checked on a non-empty list), setting the clock time of a food or an activity, deleting a whole measurement tracker (single values can be deleted), custom measurements beyond the site's 14 kinds, e-mail, password and other account settings, the "activities raise nutrient needs" switch, and the site's native XLS/PDF export (`export_diary_csv` replaces it). Drinks are ordinary foods (for example "voda čistá" in millilitres); the site has no separate litre entry.
+
+**Diary sharing** (Settings → Sharing) lets the site give another person (a dietitian, family) access to your diaries, statistics and notes, optionally for a limited period or even with permission to write into your diary. It is deliberately not offered through the agent: it is a third party's access to health data, and a change like that should be made knowingly by you in the site's settings, not in passing in a conversation.
 
 ### Recipes: quantities
 

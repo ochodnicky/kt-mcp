@@ -9,8 +9,10 @@
  * Default mode only reads. With --write, every write happens on TOMORROW, which
  * must be completely empty (the run aborts otherwise), and every entry, note
  * and activity created is deleted again; a favourite is added and removed for a
- * food that was not one; the latest weight is re-saved with its own value; and a
- * few goal values (drinking goal, own basal, one carbohydrate goal) are changed
+ * food that was not one; the latest weight is re-saved with its own value; a test
+ * body-measurement tracker is started and removed again (only when none of that
+ * kind exists); a test activity is favourited and used as a weekly routine, an activity's duration is changed, a day is saved as a template and written to the day after tomorrow (all removed again); own food and own activity lines are logged, a throwaway saved recipe is created, edited and deleted (your own recipes are never touched); a test line is moved between meals and, if the day after
+ * tomorrow is also empty, to that day and back; and a few goal values (drinking goal, own basal, one carbohydrate goal) are changed
  * and put back, with the whole goals block compared to its snapshot.
  * The run ends by checking that tomorrow is empty again. Nothing on today or
  * earlier days is ever modified. Exit code 1 if any check fails.
@@ -22,6 +24,7 @@ const { rankNutrient } = await import(dist('kt/ranking.js'));
 const { summarizeBalances } = await import(dist('kt/balance.js'));
 const { entriesToCsv } = await import(dist('kt/export.js'));
 const { goalWarnings } = await import(dist('kt/goals.js'));
+const { summarizeHydration } = await import(dist('kt/stats.js'));
 
 if (!process.env.KT_EMAIL || !process.env.KT_PASSWORD) {
   console.error('Set KT_EMAIL and KT_PASSWORD in the environment first.');
@@ -90,6 +93,59 @@ if (meals[0]) {
 }
 const acts = await client.searchActivities('chůze', 3);
 ok('activity search', acts.length > 0, acts.map(a => a.title).join(' | '));
+
+section('Drinking, analysis, measurements, recipes, extra nutrients');
+const hydration = await client.getHydration(weekAgo, today);
+const hs = summarizeHydration(hydration);
+ok('drinking for 7 days', hydration.length === 7 && hydration.every(d => d.litres !== null && d.goalLitres !== null), `avg ${hs.averageLitres} l, ${hs.daysWithDrinks} days with drinks, goal ${hs.averageGoalLitres} l`);
+const year = await client.getHydration(shift(today, -364), today);
+ok('drinking works for a whole year', year.length === 365 && year.some(d => d.litres !== null), `${year.filter(d => (d.litres ?? 0) > 0).length} days with drinks`);
+const { analysis, tips } = await client.getGoalAnalysis(weekAgo, shift(today, -1));
+ok('analysis has the main nutrients', ['Bílkoviny', 'Sacharidy', 'Tuky'].every(t => analysis.nutrients.some(n => n.title === t && n.averageG !== null)), analysis.nutrients.map(n => `${n.title} ${n.percentOfGoal}%`).join(', '));
+ok('analysis has energy, calcium in mg and sources', analysis.energy?.unit === 'kcal' && (analysis.calcium === null || analysis.calcium.unit === 'mg') && analysis.sourcesByFood.length > 0, `energy ${analysis.energy?.average}/${analysis.energy?.goal}, ${analysis.sourcesByFood.length} source groups`);
+console.log('tips:', tips.map(t => t.title).join(' | ') || 'none');
+const lunchOnly = await client.getGoalAnalysis(weekAgo, shift(today, -1), '3');
+ok('analysis narrowed to one meal differs from all meals', JSON.stringify(lunchOnly.analysis.nutrients) !== JSON.stringify(analysis.nutrients) || lunchOnly.analysis.recordsMissing !== null);
+const kinds = await client.listTrackTypes();
+ok('14 kinds of measurement', kinds.length === 14 && kinds.every(k => k.name && k.unit), kinds.map(k => `${k.name} [${k.unit}]`).slice(0, 4).join(', ') + ', …');
+const trackersNow = await client.listTrackers(shift(today, -364), today);
+console.log(`trackers on the account: ${trackersNow.length}${trackersNow.length ? ' (' + trackersNow.map(t => `${t.name}: ${t.values.length}`).join(', ') + ')' : ''}`);
+const recipeTags = await client.listRecipeTags();
+ok('recipe tags', recipeTags.length > 10 && recipeTags.some(t => t.slug === 'vecere'), `${recipeTags.length} tags`);
+const found = await client.searchRecipes({ query: 'kuřecí', tags: ['večeře'], sort: 'best_rated', limit: 5 });
+ok('recipe search', found.total > 0 && found.recipes.length > 0 && found.recipes.length <= 5, `${found.total} matches, first "${found.recipes[0]?.title}"`);
+const ranged = await client.searchRecipes({ nutrient: 'energy', min: 100, max: 200, limit: 10 });
+ok('recipe energy range per 100 g is respected', ranged.recipes.length > 0 && ranged.recipes.every(r => r.per100g.energy !== null && r.per100g.energy >= 99 && r.per100g.energy <= 201), `${ranged.total} matches`);
+const quick = await client.searchRecipes({ maxPreparationMinutes: 15, limit: 5 });
+const quickDetails = await Promise.all(quick.recipes.map(r => client.getRecipe(r.id)));
+ok('preparation time limit is "at most"', quickDetails.every(d => d.preparationMinutes === null || d.preparationMinutes <= 15), quickDetails.map(d => d.preparationMinutes).join(','));
+if (found.recipes[0]) {
+  const rd = await client.getRecipe(found.recipes[0].id);
+  ok('recipe detail has ingredients, steps and nutrition', rd.ingredients.length > 0 && rd.total.energy !== null, `${rd.ingredients.length} ingredients, ${rd.steps.length} steps, ${rd.portions ?? 'no'} portions`);
+  const per100 = rd.totalWeightG ? (rd.total.energy / rd.totalWeightG) * 100 : null;
+  const listed = found.recipes[0].per100g.energy;
+  ok('detail agrees with the list per 100 g', per100 !== null && listed !== null && Math.abs(per100 - listed) / listed < 0.05, `${per100?.toFixed(1)} vs ${listed}`);
+}
+const calciumFromEntries = lines.every(l => l.nutrients.calcium === null) ? null : lines.reduce((sum, l) => sum + (l.nutrients.calcium ?? 0), 0) * 1000;
+const calciumGoal = bal.nutrients.find(n => n.code === 'calcium');
+ok('calcium from the entries matches the site\'s day balance (mg)', calciumFromEntries === null || calciumGoal?.actual === null || Math.abs(calciumFromEntries - calciumGoal.actual) / Math.max(calciumGoal.actual, 1) < 0.02, `${calciumFromEntries?.toFixed(0)} vs ${calciumGoal?.actual} ${calciumGoal?.unit}`);
+
+section('Favourite and regular activities, day templates (read-only)');
+const favActs = await client.listFavoriteActivities();
+console.log(`favourite activities: ${favActs.length}${favActs.length ? ' (' + favActs.map(a => a.title).join(', ') + ')' : ''}`);
+ok('favourite activities have the figures the site shows', favActs.every(a => a.kcalPerKgPerMinute !== null && a.kcalPerMinute !== null));
+const commonActs = await client.listCommonActivities();
+console.log(`common activities: ${commonActs.length}${commonActs.length ? ' (' + commonActs.map(a => a.title).join(', ') + ')' : ' (the site has none yet)'}`);
+ok('common activities parse', commonActs.every(a => a.id && a.title));
+const routine = await client.listRegularActivities();
+console.log(`regular activities: ${routine.length}${routine.length ? ' (' + routine.map(r => `${r.weekday} ${r.title} ${r.minutes} min`).join(', ') + ')' : ''}`);
+ok('regular activities parse', routine.every(r => r.id.length === 32 && r.minutes !== null));
+const templates = await client.listDayTemplates();
+console.log(`day templates: ${templates.length}${templates.length ? ' (' + templates.map(t => t.title).join(', ') + ')' : ''}`);
+if (templates[0]) {
+  const tc = await client.getDayTemplate(templates[0].id);
+  ok('a template can be read', tc.foodCount === tc.meals.reduce((n, m) => n + m.items.length, 0), `"${tc.title}": ${tc.foodCount} lines, ${tc.notes.length} notes`);
+}
 
 section('CSV export');
 const { csv, rows } = entriesToCsv(range);
@@ -170,6 +226,229 @@ if (WRITE) {
     ok(`${tomorrow} is empty again`, left === 0, `${left} items left`);
   }
 
+  // tracked measurements: start a test tracker, add and remove a value, then delete the whole test tracker
+  {
+    const KIND = 'Obvod krku';
+    const window = [shift(today, -1094), today];
+    const existing = (await client.listTrackers(...window)).find(t => t.name === KIND);
+    if (existing) {
+      console.log(`SKIP  "${KIND}" is already tracked on this account — not touching it`);
+    } else {
+      let trackerId = null;
+      try {
+        const first = await client.addTrackedValue({ measurement: 'krku', value: 38.5 });
+        ok('tracker started with today\'s value', first.createdTracker && first.recorded === 38.5, `${first.tracker} [${first.unit}]`);
+        const list1 = await client.listTrackers(...window);
+        trackerId = list1.find(t => t.name === KIND)?.id ?? null;
+        ok('tracker is listed', trackerId !== null);
+        await client.addTrackedValue({ measurement: 'krku', value: 38.2, date: shift(today, -1) });
+        const list2 = (await client.listTrackers(...window)).find(t => t.id === trackerId);
+        ok('a value for yesterday was added', list2?.values.length === 2 && list2.values[0].date === shift(today, -1), list2?.values.map(v => `${v.date}=${v.value}`).join(', '));
+        await client.addTrackedValue({ measurement: 'krku', value: 38.9 });
+        const list3 = (await client.listTrackers(...window)).find(t => t.id === trackerId);
+        const todays = list3?.values.filter(v => v.date === today) ?? [];
+        ok('a second value on the same day replaces the first', todays.length === 1 && todays[0].value === 38.9, todays.map(v => v.value).join(' and '));
+        const yesterdayValue = list3?.values.find(v => v.date === shift(today, -1));
+        const del = await client.deleteTrackedValue(yesterdayValue.id);
+        ok('one value deleted and confirmed', del.confirmed === true && del.value === 38.2);
+        await client.deleteTrackedValue('0'.repeat(32)).then(() => ok('an unknown id is refused', false), e => ok('an unknown id is refused', /No tracked measurement/.test(e.message)));
+        const weightBefore = (await client.getWeightHistory(today)).records.length;
+        ok('weight records untouched', weightBefore === weights.records.length);
+      } catch (e) {
+        ok('tracker steps completed', false, e.message);
+      } finally {
+        const id = trackerId ?? (await client.listTrackers(...window).catch(() => [])).find(t => t.name === KIND)?.id;
+        if (id) await client.deleteTracker(id).catch(e => ok('cleanup tracker', false, e.message));
+        const left = (await client.listTrackers(...window)).some(t => t.name === KIND);
+        ok('the test tracker is gone again', !left);
+      }
+    }
+  }
+
+  // moving a line: another meal, then another day (the day after tomorrow must be empty too)
+  {
+    const dayAfter = shift(tomorrow, 1);
+    const dayAfterDay = await client.getDayEntries(dayAfter, { fresh: true });
+    const dayAfterEmpty = dayAfterDay.entryCount === 0;
+    const where = { date: tomorrow, ids: [] };
+    try {
+      await client.logFood({ foodId: '47c3415addecabd5', amount: 10, unitId: '0000000000000001', meal: '1', date: tomorrow });
+      const entryId = (await client.getDayEntries(tomorrow, { fresh: true })).meals.flatMap(m => m.entries)[0].id;
+      const toLunch = await client.moveDiaryEntry({ date: tomorrow, entryId, meal: '3' });
+      ok('moved to lunch', toLunch.confirmed === true && toLunch.to.meal === 'Oběd', `${toLunch.from.meal} -> ${toLunch.to.meal}`);
+      if (dayAfterEmpty) {
+        const toNext = await client.moveDiaryEntry({ date: tomorrow, entryId, toDate: dayAfter });
+        ok('moved to the next day, meal kept', toNext.confirmed === true && toNext.to.date === dayAfter && toNext.to.meal === 'Oběd', `${toNext.to.date} ${toNext.to.meal}`);
+        where.date = dayAfter;
+        const back = await client.moveDiaryEntry({ date: dayAfter, entryId, toDate: tomorrow, meal: '2' });
+        ok('moved back with a new meal in one call', back.confirmed === true && back.to.date === tomorrow && back.to.meal === 'Dopolední svačina', `${back.to.date} ${back.to.meal}`);
+        where.date = tomorrow;
+      } else {
+        console.log(`SKIP  ${dayAfter} is not empty — day move not tested`);
+      }
+    } catch (e) {
+      ok('move steps completed', false, e.message);
+    } finally {
+      for (const d of [tomorrow, dayAfter]) {
+        const cur = await client.getDayEntries(d, { fresh: true }).catch(() => null);
+        if (!cur) continue;
+        if (d === dayAfter && !dayAfterEmpty) continue;
+        for (const m of cur.meals) for (const e of m.entries) await client.deleteDiaryEntry({ date: d, entryId: e.id }).catch(err => ok(`cleanup entry on ${d}`, false, err.message));
+      }
+      const t = await client.getDayEntries(tomorrow, { fresh: true });
+      const n = dayAfterEmpty ? (await client.getDayEntries(dayAfter, { fresh: true })).entryCount : 0;
+      ok('both test days are empty again', t.entryCount === 0 && n === 0, `${t.entryCount} and ${n} entries left`);
+    }
+  }
+
+  // favourite activity, weekly routine and an activity edit
+  {
+    const hit = (await client.searchActivities('plavání', 5)).find(h => !favActs.some(f => f.id === h.id) && !routine.some(r => r.activityId === h.id));
+    if (!hit) {
+      console.log('SKIP  no suitable test activity (all swimming activities are already favourites or regular)');
+    } else {
+      let regularIds = [];
+      try {
+        const add = await client.setFavoriteActivity(hit.id, true);
+        ok(`"${hit.title}" added to the favourite activities`, add.confirmed === true);
+        const fav = (await client.listFavoriteActivities()).find(f => f.id === hit.id);
+        ok('and listed with its figures', !!fav && fav.kcalPerMinute !== null, fav ? `${fav.kcalPerMinute} kcal/min` : '');
+      } finally {
+        const rem = await client.setFavoriteActivity(hit.id, false);
+        ok('favourite activity removed again', rem.confirmed === true);
+        ok('favourite activities restored', (await client.listFavoriteActivities()).length === favActs.length);
+      }
+      try {
+        const r = await client.addRegularActivity({ activityId: hit.id, weekdays: ['sunday', 'saturday'], minutes: 30 });
+        regularIds = r.added.map(a => a.id);
+        ok('weekly activity added on two weekdays', r.added.length === 2 && r.added.every(a => a.minutes === 30), r.added.map(a => `${a.weekday} ${a.minutes} min`).join(', '));
+        await client.addRegularActivity({ activityId: hit.id, weekdays: ['sunday'], minutes: 30 }).then(() => ok('the same activity on the same weekday is refused', false), e => ok('the same activity on the same weekday is refused', /already a regular activity/.test(e.message)));
+        ok('nothing was written to a diary day by the routine', (await client.getDayEntries(tomorrow, { fresh: true })).activities?.length === 0);
+      } catch (e) {
+        ok('weekly activity steps completed', false, e.message);
+      } finally {
+        const now = (await client.listRegularActivities().catch(() => [])).filter(x => x.activityId === hit.id);
+        for (const x of now) await client.deleteRegularActivity(x.id).catch(err => ok('cleanup regular activity', false, err.message));
+        const left = (await client.listRegularActivities()).filter(x => x.activityId === hit.id).length;
+        ok('the test weekly activity is gone again', left === 0);
+        ok('the routine is as before', (await client.listRegularActivities()).length === routine.length);
+      }
+      try {
+        await client.logActivity({ activityId: hit.id, minutes: 30, date: tomorrow });
+        const a0 = (await client.getDayEntries(tomorrow, { fresh: true })).activities[0];
+        const upd = await client.updateActivity({ date: tomorrow, activityId: a0.id, minutes: 45 });
+        ok('activity duration changed 30 -> 45 min', upd.after?.durationMinutes === 45 && upd.before.durationMinutes === 30 && upd.after.energy > upd.before.energy, `${upd.before.energy} -> ${upd.after?.energy} kcal`);
+      } catch (e) {
+        ok('activity edit steps completed', false, e.message);
+      } finally {
+        const d = await client.getDayEntries(tomorrow, { fresh: true });
+        for (const a of d.activities ?? []) await client.deleteActivity({ date: tomorrow, activityId: a.id }).catch(err => ok('cleanup activity', false, err.message));
+        ok('tomorrow has no activities again', ((await client.getDayEntries(tomorrow, { fresh: true })).activities ?? []).length === 0);
+      }
+    }
+  }
+
+  // day template: save tomorrow as a template, read it, write it to the day after tomorrow, delete it
+  {
+    const dayAfter = shift(tomorrow, 1);
+    const TITLE = 'KT smoke test';
+    const dayAfterDay = await client.getDayEntries(dayAfter, { fresh: true });
+    const clean = dayAfterDay.entryCount + (dayAfterDay.notes?.length ?? 0) === 0;
+    if (!clean || (await client.listDayTemplates()).some(t => t.title === TITLE)) {
+      console.log(`SKIP  ${dayAfter} is not empty or a "${TITLE}" template exists — template test not run`);
+    } else {
+      let templateId = null;
+      try {
+        await client.logFood({ foodId: '47c3415addecabd5', amount: 10, unitId: '0000000000000001', meal: '1', date: tomorrow });
+        await client.addNote({ date: tomorrow, text: 'Smoke test — template note' });
+        const saved = await client.saveDayAsTemplate({ date: tomorrow, title: TITLE, includeNotes: true });
+        templateId = saved.template?.id ?? null;
+        ok('day saved as a template and identified', templateId !== null && saved.entries === 1);
+        const tc = await client.getDayTemplate(templateId);
+        ok('template shows the food and the note', tc.foodCount === 1 && tc.meals[0]?.meal === 'Snídaně' && tc.notes.some(n => n.startsWith('Smoke')), `${tc.meals[0]?.items[0]?.title} ${tc.meals[0]?.items[0]?.amount}`);
+        const applied = await client.applyDayTemplate({ templateId, dates: [dayAfter] });
+        ok('template written to the day after tomorrow', applied.days[0].entriesAfter - applied.days[0].entriesBefore === applied.expectedFoods, `${applied.days[0].entriesBefore} -> ${applied.days[0].entriesAfter}`);
+        const written = await client.getDayEntries(dayAfter, { fresh: true });
+        ok('its note came along', [...(written.notes ?? []), ...written.meals.flatMap(m => m.notes ?? [])].some(n => n.text.startsWith('Smoke')));
+      } catch (e) {
+        ok('template steps completed', false, e.message);
+      } finally {
+        if (templateId) {
+          const del = await client.deleteDayTemplate(templateId).catch(err => ({ confirmed: false, err: err.message }));
+          ok('template deleted', del.confirmed === true, del.err ?? '');
+        }
+        for (const d of [tomorrow, dayAfter]) {
+          const x = await client.getDayEntries(d, { fresh: true });
+          for (const m of x.meals) for (const e of m.entries) await client.deleteDiaryEntry({ date: d, entryId: e.id }).catch(() => {});
+          for (const n of [...(x.notes ?? []), ...x.meals.flatMap(m => m.notes ?? [])]) await client.deleteNote({ date: d, noteId: n.id }).catch(() => {});
+        }
+        const a = await client.getDayEntries(tomorrow, { fresh: true });
+        const b = await client.getDayEntries(dayAfter, { fresh: true });
+        ok('both test days are empty again', a.entryCount + (a.notes?.length ?? 0) + b.entryCount + (b.notes?.length ?? 0) === 0);
+        ok('the templates are as before', (await client.listDayTemplates()).length === templates.length);
+      }
+    }
+  }
+
+  // own food and own activity, then a throwaway saved recipe that is edited and deleted
+  {
+    try {
+      const food = await client.logCustomFood({ title: 'KT smoke vlastní jídlo', energy: 400, meal: '3', date: tomorrow, nutrients: { protein: 30, carbohydrate: 40, fat: 10, fibre: 5, sugar: 8, saturatedFat: 3, salt: 1.2, alcohol: 4 } });
+      const e = food.added;
+      ok('own food logged with the values given', !!e && e.energy === 400 && e.nutrients.protein === 30 && e.nutrients.salt === 1.2 && e.nutrients.alcohol === 4 && e.nutrients.calcium === null, e ? `${e.title}: ${e.energy} ${food.energyUnit}` : 'not identified');
+      const plain = await client.logCustomFood({ title: 'KT smoke jen energie', energy: 120, meal: '1', date: tomorrow });
+      ok('own food with energy only keeps the nutrients unknown', !!plain.added && plain.added.energy === 120 && plain.added.nutrients.protein === null && plain.added.nutrients.fat === null);
+      ok('an own food is not added to the database', (await client.search('KT smoke vlastní', 5)).length === 0);
+      const act = await client.logCustomActivity({ title: 'KT smoke vlastní aktivita', minutes: 45, energy: 210, date: tomorrow });
+      ok('own activity logged with the values given', act.added?.durationMinutes === 45 && act.added.energy === 210, `${act.added?.title} ${act.added?.durationMinutes} min, ${act.added?.energy} kcal`);
+      ok('an own activity is not added to the catalogue', (await client.searchActivities('KT smoke vlastní', 5)).length === 0);
+      ok('favourites and common foods are unaffected', (await client.listFavoriteFoods()).length === favs.length && (await client.listCommonFoods()).length === common.length);
+    } catch (e) {
+      ok('own food and activity steps completed', false, e.message);
+    } finally {
+      const d = await client.getDayEntries(tomorrow, { fresh: true });
+      for (const m of d.meals) for (const x of m.entries) await client.deleteDiaryEntry({ date: tomorrow, entryId: x.id }).catch(err => ok('cleanup entry', false, err.message));
+      for (const a of d.activities ?? []) await client.deleteActivity({ date: tomorrow, activityId: a.id }).catch(err => ok('cleanup activity', false, err.message));
+      const e = await client.getDayEntries(tomorrow, { fresh: true });
+      ok('tomorrow is empty again after the own items', e.entryCount + (e.activities?.length ?? 0) === 0);
+    }
+
+    const mealsBefore = await client.listMeals();
+    let mealId = null;
+    try {
+      const carrot = (await client.search('mrkev', 3))[0];
+      mealId = await client.createMeal({ title: 'KT smoke recipe', ingredients: [{ foodId: '47c3415addecabd5', amount: 100 }, { foodId: '47c3415addecabd5', amount: 50 }] });
+      // two lines of the same food: changing by food id must be refused as ambiguous
+      await client.changeMealIngredients({ mealId, change: [{ foodId: '47c3415addecabd5', amount: 5 }] }).then(() => ok('a food that is in the recipe twice is refused', false), e => ok('a food that is in the recipe twice is refused', /2 times/.test(e.message)));
+      const named = await client.updateMeal({ mealId, title: 'KT smoke recipe 2', portions: 4, steps: ['Krok jedna', 'Krok dvě'] });
+      ok('recipe renamed, given portions and steps', named.confirmed === true && named.now.title === 'KT smoke recipe 2' && named.now.portions === 4 && named.now.steps.length === 2);
+      const swapped = await client.changeMealIngredients({ mealId, remove: ['47c3415addecabd5'].filter(() => false), add: [{ foodId: carrot.id, amount: 80 }] });
+      ok('an ingredient was added', swapped.confirmed === true && swapped.now.ingredients.some(i => i.foodId === carrot.id && i.count === 80), swapped.now.ingredients.map(i => `${i.title} ${i.count}`).join(', '));
+      const expected = (await client.getNutrition('47c3415addecabd5', 150, '0000000000000001')).energy + (await client.getNutrition(carrot.id, 80, '0000000000000001')).energy;
+      const now = (await client.listMeals()).find(m => m.id === mealId);
+      ok('the site recomputed the energy from the food ids', Math.abs(now.energy - expected) <= 1.5, `${now.energy} vs ${expected.toFixed(1)} ${now.energyUnit}`);
+      // drop the duplicate cucumber lines by rebuilding: remove is refused while ambiguous, so edit a one-line recipe instead
+      const second = await client.createMeal({ title: 'KT smoke recipe single', ingredients: [{ foodId: '47c3415addecabd5', amount: 100 }, { foodId: carrot.id, amount: 40 }] });
+      try {
+        const changed = await client.changeMealIngredients({ mealId: second, change: [{ foodId: carrot.id, amount: 200 }], remove: ['47c3415addecabd5'] });
+        ok('an amount was changed and another ingredient removed', changed.confirmed === true && changed.now.ingredients.length === 1 && changed.now.ingredients[0].count === 200, changed.now.ingredients.map(i => `${i.title} ${i.count}`).join(', '));
+        await client.changeMealIngredients({ mealId: second, remove: [carrot.id] }).then(() => ok('the last ingredient cannot be removed', false), e => ok('the last ingredient cannot be removed', /at least one ingredient/.test(e.message)));
+        const cleared = await client.updateMeal({ mealId: second, steps: [] });
+        ok('steps can be cleared', cleared.confirmed === true && cleared.now.steps.length === 0);
+        const detail = await client.getMealDetails(second);
+        ok('the edited recipe is readable with get_meal_details', detail.ingredients.length === 1);
+      } finally {
+        await client.deleteMeal(second).catch(err => ok('cleanup second recipe', false, err.message));
+      }
+    } catch (e) {
+      ok('recipe edit steps completed', false, e.message);
+    } finally {
+      if (mealId) await client.deleteMeal(mealId).catch(err => ok('cleanup recipe', false, err.message));
+      const left = await client.listMeals();
+      ok('the saved recipes are as before', left.length === mealsBefore.length && left.every(m => mealsBefore.some(b => b.id === m.id)), `${left.length} recipes`);
+    }
+  }
+
   // favourites: a food that is not one yet
   const hits = await client.search('celer', 10);
   const food = hits.find(h => !favs.some(f => f.id === h.id));
@@ -189,14 +468,21 @@ if (WRITE) {
     const snapshot = await client.getGoals();
     const weightRecords = (await client.getWeightHistory(today)).records.length;
     const carb = snapshot.nutrients.find(n => n.code === 'carbohydrate');
+    // A value different from the current own basal, or the diary's energy goal could not be seen to move.
+    const testBasal = snapshot.basal.own !== null && Math.abs(snapshot.basal.own - 1750) <= 1 ? 1700 : 1750;
     try {
       const r = await client.updateGoals({
         drinkLiters: snapshot.drinkLiters === 3.3 ? 3.4 : 3.3,
-        ownBasal: 1750,
+        ownBasal: testBasal,
         ...(carb && carb.own !== null ? { nutrients: [{ code: 'carbohydrate', grams: carb.own + 1 }] } : {}),
       });
-      ok('goals changed and read back', r.notApplied.length === 0 && Math.abs((r.after?.basal.own ?? 0) - 1750) <= 1, `changed ${r.changed.join(', ')}`);
-      ok('the diary\'s energy goal follows the own basal', r.after?.effective?.energyGoal !== snapshot.effective?.energyGoal, `${snapshot.effective?.energyGoal} -> ${r.after?.effective?.energyGoal}`);
+      ok('goals changed and read back', r.notApplied.length === 0 && Math.abs((r.after?.basal.own ?? 0) - testBasal) <= 1, `changed ${r.changed.join(', ')}`);
+      if (snapshot.targetEnergy.own !== null) {
+        // An own energy goal switches the deficit model off, so the basal cannot move the goal.
+        ok('the own energy goal stays put when the basal changes', r.after?.effective?.energyGoal === snapshot.effective?.energyGoal, `${snapshot.effective?.energyGoal} -> ${r.after?.effective?.energyGoal}`);
+      } else {
+        ok('the diary\'s energy goal follows the own basal', r.after?.effective?.energyGoal !== snapshot.effective?.energyGoal, `${snapshot.effective?.energyGoal} -> ${r.after?.effective?.energyGoal}`);
+      }
     } finally {
       const back = await client.updateGoals({
         drinkLiters: snapshot.drinkLiters,
