@@ -570,3 +570,29 @@ test('get_energy_model looks back the requested weeks from yesterday unless told
   assert.equal(range[1], shiftDate(todayCzech(), -1));
   assert.equal(range[0], shiftDate(todayCzech(), -28));
 });
+
+test('log lines never contain the MCP access token, even for a tool that takes no arguments', async () => {
+  const tools = register({ getGoals: async () => goals() });
+  // What the SDK passes to a tool WITHOUT an input schema: the request context, with the caller's OAuth token in it.
+  const context = {
+    signal: new AbortController().signal,
+    authInfo: { token: 'MCP-ACCESS-TOKEN-SENTINEL', clientId: 'c', scopes: ['caltrack:log'] },
+    requestInfo: { headers: { authorization: 'Bearer MCP-ACCESS-TOKEN-SENTINEL' } },
+  };
+  const captured: string[] = [];
+  const log = console.log, err = console.error;
+  console.log = (...a: unknown[]) => void captured.push(a.join(' '));
+  console.error = (...a: unknown[]) => void captured.push(a.join(' '));
+  try {
+    await tools.get('get_goals')!.handler(context as never);
+    await tools.get('get_day_entries')!.handler({ date: '10.11.2026' });
+  } finally {
+    console.log = log;
+    console.error = err;
+  }
+  const all = captured.join('\n');
+  assert.ok(captured.length >= 2);
+  assert.ok(!/SENTINEL|authorization|authInfo|requestInfo|Bearer/i.test(all), all);
+  assert.match(captured[0]!, /^\[tool\] get_goals \{\} -> ok$/);
+  assert.match(all, /"date":"10\.11\.2026"/, 'real arguments are still logged');
+});
