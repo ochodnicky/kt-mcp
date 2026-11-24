@@ -141,6 +141,27 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 | „Váha mi stojí, zjisti proč a navrhni úpravu." | prompt `plateau_review` → `get_goals` → `get_energy_model` → (po souhlasu) `update_goals` |
 | „Nastav sacharidy na 178 g, ať to vychází na cíl." | `get_goals` → `update_goals` |
 | „Změň úroveň aktivity na lehce aktivní." | `get_goals` → `update_goals` |
+| „Kolik kalorií má 150 g skyru?" | `search_food` → `get_food_nutrition` |
+| „Najdi mi potravinu podle čárového kódu." | `search_food` (13místný EAN) |
+| „Zapiš ke snídani 3 vejce a 80 g ovesných vloček." | `search_food` → `get_food_portions` → `log_food` |
+| „Co jsem dnes zatím snědl?" | `get_day_entries` |
+| „Co jsem jedl minulý týden?" | `get_diary_range` (nejvýš 14 dní najednou) |
+| „Jak si stojím dnes proti cílům u bílkovin, sacharidů a tuků?" | `get_day_balance` |
+| „Co zapisuju nejčastěji?" | `list_common_foods` |
+| „Přidej skyr mezi oblíbené." | `search_food` → `add_favorite_food` |
+| „Odeber ho z oblíbených." | `list_favorite_foods` → `remove_favorite_food` |
+| „Zkopíruj celý včerejšek na zítra." | `copy_day` |
+| „Ulož tenhle recept z fotky jako jídlo." | `search_food` → `create_meal` |
+| „Zapiš moji mrkvovou bábovku k večeři." | `list_my_meals` → `log_meal` |
+| „Smaž ten uložený recept." | `list_my_meals` → `delete_meal` (po potvrzení) |
+| „Smaž dnešní chůzi." | `get_day_entries` → `delete_activity` |
+| „Smaž poznámku k obědu." | `get_day_entries` → `delete_diary_note` |
+| „Jak se mi tenhle měsíc vyvíjela váha a kolik mi zbývá k cíli?" | `get_weight_history` |
+| „Odhadni z posledních šesti týdnů, kolik skutečně spaluju." | `get_energy_model` s `weeks` |
+| „Nastav makra na 30 % bílkovin, 40 % sacharidů a 30 % tuků." | `get_goals` → `update_goals` (procenta jen pro všechna tři makra společně) |
+| „Zruš můj vlastní bazál a vrať výpočet webu." | `get_goals` → `update_goals` (`null` vlastní hodnotu zruší) |
+| „Zapiš mou oblíbenou ovesnou kaši k snídani." | prompt `log_favorite` |
+| „Ukaž surové denní součty a týdenní grafy tak, jak je posílá web." | `get_day_summary` |
 
 ### Jak se zápisy hlídají
 
