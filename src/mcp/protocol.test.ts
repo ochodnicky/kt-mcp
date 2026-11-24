@@ -180,3 +180,13 @@ test('values the schema cannot accept never reach the custom-item and recipe-edi
   }
   assert.equal(called, 0);
 });
+
+test('log_meal refuses an amount of zero or less in the schema, before the handler runs', async () => {
+  let called = 0;
+  const client = await connect({ logMeal: async () => ((called += 1), {}) } as unknown as Partial<KtClient>);
+  for (const args of [{ portions: 0 }, { grams: -1 }, { percent: 0 }, { portions: 5000 }, { grams: 1_000_000 }]) {
+    const r = await client.callTool({ name: 'log_meal', arguments: { meal_id: 'a'.repeat(32), meal: '1', ...args } }).catch(e => e);
+    assert.ok(r instanceof Error || (r as { isError?: boolean }).isError, JSON.stringify(args));
+  }
+  assert.equal(called, 0);
+});

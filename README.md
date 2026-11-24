@@ -143,8 +143,8 @@ Nástroje, které **mění deník**, jsou označené ✏️. Agent by je měl vo
 |---|---|
 | `create_meal` ✏️ | Uloží recept složený z existujících potravin. |
 | `list_my_meals` | Vypíše uložené recepty s jejich id a celkovou energií. |
-| `get_meal_details` | Suroviny uloženého receptu s množstvím a nutričními hodnotami a součty za celý recept (ne za porci). |
-| `log_meal` ✏️ | Zaloguje celý uložený recept jako jeden záznam. |
+| `get_meal_details` | Suroviny uloženého receptu s množstvím a nutričními hodnotami, součty za celý recept (ne za porci), celková váha a počet porcí (pokud je autor uvedl). |
+| `log_meal` ✏️ | Zaloguje uložený recept jako jeden záznam: celý, nebo jeho část podle `portions` (počet porcí), `grams` (snědená hmotnost) či `percent` (podíl). Web surovinám přepočítá množství a výsledek se ověří proti podílu energie receptu. |
 | `delete_meal` ✏️ | Smaže uložený recept. |
 | `update_meal` ✏️ | Přejmenuje uložený recept, nastaví počet porcí a nahradí postup (kroky). Suroviny se nemění. Výsledek se přečte zpět. |
 | `change_meal_ingredients` ✏️ | Přidá, změní nebo odebere suroviny uloženého receptu podle id potraviny; nutriční hodnoty přepočítá web. Potravinu, která je v receptu víckrát, odmítne (nejasné, který řádek), přidání potraviny, která v receptu už je, také (použije se změna množství) a recept musí mít aspoň jednu surovinu. Při změně bez uvedené jednotky řádek jednotku zachová. Už zapsané řádky z receptu se nemění. |
@@ -201,6 +201,9 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 | „Zkopíruj celý včerejšek na zítra." | `copy_day` |
 | „Ulož tenhle recept z fotky jako jídlo." | `search_food` → `create_meal` |
 | „Zapiš moji mrkvovou bábovku k večeři." | `list_my_meals` → `log_meal` |
+| „K večeři jsem snědl jeden kousek bábovky (z 14 porcí)." | `list_my_meals` → `log_meal` s `portions` = 1 |
+| „Z té polévky jsem měl asi čtvrtinu." | `list_my_meals` → `log_meal` s `percent` = 25 |
+| „Z gulaše jsem snědl 350 g." | `get_meal_details` → `log_meal` s `grams` = 350 |
 | „Smaž ten uložený recept." | `list_my_meals` → `delete_meal` (po potvrzení) |
 | „Smaž dnešní chůzi." | `get_day_entries` → `delete_activity` |
 | „Smaž poznámku k obědu." | `get_day_entries` → `delete_diary_note` |
@@ -477,7 +480,7 @@ jméno klienta zobrazené ve formuláři.
 - **Bilance.** `planned_deficit` je údaj „Kalorický deficit" z webu, tedy cíl minus udržovací příjem, ne to, jak den skutečně dopadl; skutečný rozdíl je `net_balance` (příjem minus výdej, počítá ho server). Příjem 0 znamená, že se nic nezapsalo; web nerozliší „nejedl jsem nic" od „nezapsal jsem nic", a proto průměry v `get_balance_range` počítají jen dny s nenulovým příjmem.
 - **Detail receptu** dohledává výživové hodnoty každé suroviny zvlášť (jeden požadavek na surovinu). Surovina, k níž web hodnoty nedá, má `null` a součet se pak týká jen známých.
 - **Poznámky dne obsahují celý uživatelský záznam.** Odpověď webu u každé poznámky přibaluje i e-mail a hash hesla. Klient čte jen `id`, `text` a datum a nic dalšího nepředává. Aktivity z různých zdrojů (telefon, hodinky) se mohou překrývat. Pole `drinkRegime` bylo za 30 dní vždy 0, proto se nevystavuje.
-- **Část porce receptu zalogovat nejde.** Formulář pro přidání jídla sice nabízí `count` proti pseudo-jednotkám porce, procenta a gramy, ale server ho ignoruje a zaloguje vždy celý recept — měřeno na receptu o 249 kcal přidalo 0,5 porce i polovina váhy plných 249. `log_meal` proto nemá argument `portions`; když snědená byla jen část receptu, zalogujte suroviny jednotlivě přes `log_food`.
+- **Část receptu se loguje tak, jak to dělá web.** Server recept sám nepřepočítává: dialog na webu přepočítá v prohlížeči množství každé suroviny a odešle formulář s příznakem `dontSendUnit`; nejvyšší `count` a jednotku server ignoruje (proto dřívější pokus s ním zapsal vždy celý recept). `log_meal` dělá totéž, tedy podíl (`portions` / `grams` / `percent`) aplikuje na původní množství každé vybrané suroviny. Řádek v deníku pak ukazuje snědenou hmotnost (např. „127 g“) a výsledek porovná jeho energii s odpovídajícím podílem energie celého receptu (`energy_matches`). Zapsat se dá nejvýš desetinásobek receptu. `portions` vyžaduje, aby recept měl počet porcí (`get_meal_details`, nastavit jde přes `update_meal`).
 
 ## Licence
 

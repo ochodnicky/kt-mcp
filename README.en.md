@@ -143,8 +143,8 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 |---|---|
 | `create_meal` ✏️ | Save a recipe built from existing foods. |
 | `list_my_meals` | List saved recipes with their ids and total energy. |
-| `get_meal_details` | A saved recipe's ingredients with amounts and nutrition, plus totals for the whole recipe (not per portion). |
-| `log_meal` ✏️ | Log a whole saved recipe into the diary as one entry. |
+| `get_meal_details` | A saved recipe's ingredients with amounts and nutrition, totals for the whole recipe (not per portion), the total weight and the portion count (when the author set one). |
+| `log_meal` ✏️ | Log a saved recipe into the diary as one entry: the whole recipe, or a part of it by `portions` (number of portions), `grams` (weight eaten) or `percent` (share). The site rescales the ingredients, and the result is checked against the matching share of the recipe's energy. |
 | `delete_meal` ✏️ | Delete a saved recipe. |
 | `update_meal` ✏️ | Rename a saved recipe, set its portion count and replace its preparation steps. Ingredients are untouched. The result is read back. |
 | `change_meal_ingredients` ✏️ | Add, change or remove the ingredients of a saved recipe by food id; the site recomputes the nutrition. A food that is in the recipe more than once is refused (it is unclear which line is meant), so is adding a food that is already in it (use a change of amount), and a recipe must keep at least one ingredient. A change without a unit keeps the line's unit. Lines already logged from the recipe are not changed. |
@@ -201,6 +201,9 @@ Clients that support MCP prompts offer these as ready-made shortcuts:
 | "Copy all of yesterday to tomorrow." | `copy_day` |
 | "Save this recipe from the photo as a meal." | `search_food` → `create_meal` |
 | "Log my carrot cake for dinner." | `list_my_meals` → `log_meal` |
+| "I had one slice of the carrot cake (it has 14 portions)." | `list_my_meals` → `log_meal` with `portions` = 1 |
+| "I had about a quarter of that soup." | `list_my_meals` → `log_meal` with `percent` = 25 |
+| "I ate 350 g of the goulash." | `get_meal_details` → `log_meal` with `grams` = 350 |
 | "Delete that saved recipe." | `list_my_meals` → `delete_meal` (after confirmation) |
 | "Delete today's walk." | `get_day_entries` → `delete_activity` |
 | "Delete the note on lunch." | `get_day_entries` → `delete_diary_note` |
@@ -480,7 +483,7 @@ on the form before authorizing.
 - **Balance.** `planned_deficit` is the site's "Kalorický deficit", i.e. goal minus maintenance intake, not how the day actually came out; the actual difference is `net_balance` (intake minus output, computed by the server). An intake of 0 means nothing was logged; the site cannot tell "ate nothing" from "logged nothing", so the averages in `get_balance_range` cover only days with a non-zero intake.
 - **Recipe details** look up each ingredient's nutrition separately (one request per ingredient). An ingredient the site gives no figures for has `null`, and the totals then cover the known ones only.
 - **Day notes carry the whole user record.** The site's response attaches the e-mail and a password hash to every note. The client reads only the `id`, `text` and date and passes nothing else on. Activities from different sources (phone, watch) can overlap. The `drinkRegime` field was always 0 over 30 days, so it is not exposed.
-- **Partial portions of a recipe cannot be logged.** The meal-add form offers a `count` against portion, percent and gram pseudo-units, but the server ignores it and logs the whole recipe regardless — measured against a 249 kcal recipe, both 0.5 portions and half the total weight added the full 249. `log_meal` therefore takes no `portions` argument; log the ingredients individually with `log_food` when only part of a recipe was eaten.
+- **Part of a recipe is logged the way the site does it.** The server never scales a recipe itself: the site's dialog rescales every ingredient's amount in the browser and posts the form with the flag `dontSendUnit`; the top-level `count` and unit are ignored (which is why an earlier attempt using only them always logged the whole recipe). `log_meal` does the same: the share (`portions` / `grams` / `percent`) is applied to the original amount of every selected ingredient. The diary line then shows the weight eaten (for example "127 g"), and the result compares its energy with the matching share of the whole recipe's energy (`energy_matches`). At most ten times the recipe can be logged. `portions` needs the recipe to have a portion count (see `get_meal_details`; set it with `update_meal`).
 
 ## License
 

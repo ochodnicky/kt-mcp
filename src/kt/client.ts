@@ -384,6 +384,25 @@ export interface MealDetails {
   id: string;
   title: string;
   ingredients: MealIngredient[];
+  /** Weight of the whole recipe in g (ml for liquids), as the site states it. */
+  totalWeight: number | null;
+  /** How many portions the recipe is divided into; null when its author set none. */
+  portions: number | null;
+}
+
+/** The result of logging a recipe. */
+export interface LoggedMeal {
+  date: string;
+  recipe: string;
+  /** What was asked for; `of` is the whole (portion count or total weight). */
+  amount: { kind: 'whole' } | { kind: 'portions' | 'grams' | 'percent'; value: number; of?: number };
+  /** Share of the whole recipe that was logged (1 = all of it). */
+  factor: number;
+  /** The new diary line; null when it could not be identified afterwards. */
+  added: DiaryEntry | null;
+  /** The whole recipe's energy times the factor, for comparing with the line the site wrote. */
+  expectedEnergy: number | null;
+  wholeRecipeEnergy: number | null;
 }
 
 export type DayOutcome =
@@ -1524,7 +1543,7 @@ export class KtClient {
         error,
       });
     }
-    return { id, title: String(form['title'] ?? ''), ingredients };
+    return { id, title: String(form['title'] ?? ''), ingredients, totalWeight: parseCzechNumber(form['totalWeight']), portions: parseCzechNumber(form['portionsMax']) };
   }
 
   // ---------------------------------------------------------------------
@@ -1617,34 +1636,85 @@ export class KtClient {
   }
 
   /**
-   * Logs a whole saved recipe into the diary.
+   * Logs a saved recipe into the diary, whole or a part of it.
    *
-   * Partial portions are deliberately not offered. The meal-add form exposes
-   * `count` against portion/percent/gram pseudo-units, but the server ignores
-   * it and logs the entire recipe whichever unit is used — measured against a
-   * 249 kcal recipe, `count` of 0.5 portions and of half the total weight both
-   * added the full 249. Rather than accept a `portions` argument that silently
-   * does nothing, log the whole recipe and let the caller log ingredients
-   * individually when they ate part of one.
+   * The site never scales a recipe on the server. Its own dialog rescales the `count` of every ingredient in the
+   * browser (by portions, grams or percent) and posts the form with the flag `dontSendUnit`; the top-level
+   * `count` and unit are ignored, which is why setting only those logs the whole recipe. This does what the
+   * dialog does: the factor is applied to each selected ingredient's original count. The diary line then
+   * shows the eaten weight ("100 g"). Without an amount the recipe is logged whole, as before.
+   *
+   * At most one of `portions` (needs a portion count on the recipe), `grams` (of the whole recipe's weight)
+   * or `percent` may be given.
    */
-  async logMeal(args: { mealId: string; meal: MealId; date?: string }): Promise<void> {
+  async logMeal(args: { mealId: string; meal: MealId; date?: string; portions?: number; grams?: number; percent?: number }): Promise<LoggedMeal> {
     const date = args.date === undefined ? todayCzech() : assertCalendarDate(args.date);
-    const form = (await this.authed(
-      `/user/meal/add/form/${encodeURIComponent(args.mealId)}?format=json`,
-    )) as Record<string, unknown>;
+    const given = [args.portions, args.grams, args.percent].filter(v => v !== undefined);
+    if (given.length > 1) throw new KtError('Give only one of portions, grams or percent');
+    for (const [name, v] of [['portions', args.portions], ['grams', args.grams], ['percent', args.percent]] as const) {
+      if (v !== undefined && (!Number.isFinite(v) || v <= 0)) throw new KtError(`${name} must be a number above 0`);
+    }
+    const id = assertEntryId(args.mealId);
+    const form = await this.authed(`/user/meal/add/form/${id}?format=json`);
+    if (!isRecord(form) || typeof form['guid'] !== 'string' || !Array.isArray(form['foodstuff']) || form['foodstuff'].length === 0) {
+      throw new KtError(`log meal: unknown recipe id ${id}`);
+    }
+    const ingredients = (form['foodstuff'] as unknown[]).filter(isRecord);
+    const title = String(form['title'] ?? '');
 
-    // As in logFood: post the form back whole, as the site's frontend does.
-    const payload: Record<string, unknown> = { ...form };
-    payload['diaryTimeGuid'] = args.meal;
-    payload['date'] = date;
-    payload['selectedUnitGuid'] = PORTION_UNIT;
-    payload['count'] = 1;
+    // How much of the recipe: 1 = all of it.
+    let factor = 1;
+    let amount: LoggedMeal['amount'] = { kind: 'whole' };
+    if (args.portions !== undefined) {
+      const max = parseCzechNumber(form['portionsMax']);
+      if (max === null || max <= 0) throw new KtError(`"${title}" has no portion count, so it cannot be logged by portions. Use grams or percent, or set portions with update_meal.`);
+      factor = args.portions / max;
+      amount = { kind: 'portions', value: args.portions, of: max };
+    } else if (args.grams !== undefined) {
+      const total = ingredients.filter(i => i['selected'] !== false).reduce((sum, i) => sum + (parseCzechNumber(i['weight']) ?? 0), 0);
+      if (total <= 0) throw new KtError(`"${title}": the site gives no weight for its ingredients, so grams cannot be worked out. Use portions or percent.`);
+      factor = args.grams / total;
+      amount = { kind: 'grams', value: args.grams, of: Math.round(total) };
+    } else if (args.percent !== undefined) {
+      factor = args.percent / 100;
+      amount = { kind: 'percent', value: args.percent };
+    }
+    if (factor > 10) throw new KtError(`That is ${Math.round(factor * 10) / 10} times the whole recipe, which looks like a mistake; check the amount.`);
 
+    const payload: Record<string, unknown> = { ...form, diaryTimeGuid: args.meal, date };
+    if (amount.kind === 'whole') {
+      // As in logFood: post the form back whole, as the site's frontend does.
+      payload['selectedUnitGuid'] = PORTION_UNIT;
+      payload['count'] = 1;
+    } else {
+      payload['dontSendUnit'] = true;
+      payload['foodstuff'] = ingredients.map(i => {
+        const base = parseCzechNumber(i['countOriginal']) ?? parseCzechNumber(i['count']);
+        if (i['selected'] === false || base === null) return i;
+        return { ...i, count: Math.round(base * factor * 10_000) / 10_000 };
+      });
+    }
+
+    const before = new Set((await this.getDayEntries(date, { fresh: true })).meals.flatMap(m => m.entries.map(e => e.id)));
     try {
       await this.authed('/user/meal/add?format=json&=', { method: 'POST', body: payload });
     } finally {
       this.invalidate();
     }
+    const added = await this.getDayEntries(date, { fresh: true }).then(
+      d => d.meals.flatMap(m => m.entries).filter(e => !before.has(e.id) && e.title === title),
+      () => [] as DiaryEntry[],
+    );
+    const whole = (await this.listMeals().catch(() => [] as MealSummary[])).find(m => m.id === id)?.energy ?? null;
+    return {
+      date,
+      recipe: title,
+      amount,
+      factor,
+      added: added.length === 1 ? added[0]! : null,
+      expectedEnergy: whole === null ? null : Math.round(whole * factor * 10) / 10,
+      wholeRecipeEnergy: whole,
+    };
   }
 
   /** Permanently deletes a saved recipe. */

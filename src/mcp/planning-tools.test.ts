@@ -150,3 +150,21 @@ test('the tools that edit or log say what they change, and the recipe tools are 
   }
   assert.match(tools.get('log_custom_food')!.config.description ?? '', /Prefer search_food/);
 });
+
+test('log_meal passes the amount on, and calls the energy a match only when the written line is close to the expected share', async () => {
+  const entry = (energy: number) => ({ id: 'newline00001', title: 'Test bábovka', kind: 'recipe' as const, quantity: { raw: '100 g', count: null, label: null, unitSize: null, unitSizeUnit: null, total: 100, totalUnit: 'g' as const }, energy, energyUnit: 'kcal', nutrients: { protein: null, carbohydrate: null, fat: null, fibre: null, sugar: null, saturatedFat: null, salt: null, calcium: null, cholesterol: null, sodium: null, transFat: null, monounsaturatedFat: null, polyunsaturatedFat: null, alcohol: null } });
+  const result = (e: number | null) => ({ date: '10.11.2026', recipe: 'Test bábovka', amount: { kind: 'portions' as const, value: 1, of: 14 }, factor: 1 / 14, added: e === null ? null : entry(e), expectedEnergy: 211.6, wholeRecipeEnergy: 2962 });
+  let asked: unknown;
+  const ok = register({ logMeal: async (a: unknown) => ((asked = a), result(212)) });
+  const good = await call(ok, 'log_meal', { meal_id: 'a'.repeat(32), meal: '1', portions: 1 });
+  assert.deepEqual(asked, { mealId: 'a'.repeat(32), meal: '1', date: undefined, portions: 1, grams: undefined, percent: undefined });
+  assert.deepEqual([good.json.energy_matches, good.json.share_of_recipe_percent, good.json.entry.entry_id, good.json.note], [true, 7.1, 'newline00001', undefined]);
+  const whole = register({ logMeal: async () => result(2962) });
+  const bad = await call(whole, 'log_meal', { meal_id: 'a'.repeat(32), meal: '1', portions: 1 });
+  assert.equal(bad.json.energy_matches, false);
+  assert.match(bad.json.note, /differs from the expected share/);
+  const none = register({ logMeal: async () => result(null) });
+  const lost = await call(none, 'log_meal', { meal_id: 'a'.repeat(32), meal: '1', portions: 1 });
+  assert.deepEqual([lost.json.energy_matches, lost.json.entry], [null, null]);
+  assert.match(lost.json.note, /could not be identified/);
+});

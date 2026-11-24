@@ -249,27 +249,43 @@ export function registerTools(server: McpServer, kt: KtClient): void {
   server.registerTool(
     'log_meal',
     {
-      title: 'Log a saved recipe to the diary',
+      title: 'Log a saved recipe (or a part of it) to the diary',
       description:
-        "Log one of the user's saved recipes into their diary as a single entry. Find the recipe id with list_my_meals first. This writes to their real diary. " +
-        'The whole recipe is always logged — the site provides no way to log a fraction of one. If the user ate only part of a recipe, log the individual ingredients with log_food instead.',
+        "Log one of the user's saved recipes into their diary as a single entry, whole or a part of it. Find the recipe id with list_my_meals first. This writes to their real diary, so confirm the amount when it is unclear. " +
+        'Without an amount the WHOLE recipe is logged. When the user ate only part of it, give exactly one of: portions (e.g. 1 or 0.5; needs the recipe to have a portion count, see portions in get_meal_details; set it with update_meal if missing), ' +
+        'grams (the weight of what they ate, out of the recipe\'s total weight in get_meal_details) or percent (e.g. 25 for a quarter). ' +
+        'The site scales every ingredient proportionally, as its own dialog does. The result shows the line the site wrote and compares its energy with the share of the whole recipe\'s energy; if energy_matches is false, check it with get_day_entries and delete_diary_entry before logging again.',
       inputSchema: {
         meal_id: z.string().min(1).describe('Recipe id from list_my_meals.'),
         meal: z.enum(MEAL_IDS).describe(mealDescription),
         date: z.string().optional().describe(dateDescription),
+        portions: z.number().positive().max(1000).optional().describe('How many portions were eaten (the recipe must have a portion count).'),
+        grams: z.number().positive().max(100000).optional().describe('The weight eaten in grams (millilitres for liquids), out of the recipe\'s total weight.'),
+        percent: z.number().positive().max(1000).optional().describe('The share of the recipe eaten, in percent (100 = all of it).'),
       },
       annotations: { destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
-    guard('log_meal', async ({ meal_id, meal, date }) => {
-      await kt.logMeal({ mealId: meal_id, meal, date });
-      // Same as log_food: the diary entry exists, so the read-back may not fail the tool.
-      const logged = (await kt.listMeals().catch(() => [])).find(m => m.id === meal_id);
+    guard('log_meal', async ({ meal_id, meal, date, portions, grams, percent }) => {
+      const r = await kt.logMeal({ mealId: meal_id, meal, date, portions, grams, percent });
+      const eaten = r.added?.energy ?? null;
+      const matches = eaten !== null && r.expectedEnergy !== null ? Math.abs(eaten - r.expectedEnergy) <= Math.max(3, r.expectedEnergy * 0.03) : null;
       return json({
         logged: true,
-        recipe: logged?.title ?? meal_id,
-        energy: logged && logged.energy !== null ? `${logged.energy} ${logged.energyUnit}` : null,
+        recipe: r.recipe,
         meal: MEALS[meal],
-        date: date ?? todayCzech(),
+        date: r.date,
+        amount: r.amount,
+        share_of_recipe_percent: Math.round(r.factor * 1000) / 10,
+        entry: r.added ? presentEntry(r.added) : null,
+        energy_expected: r.expectedEnergy,
+        energy_of_whole_recipe: r.wholeRecipeEnergy,
+        energy_matches: matches,
+        note:
+          r.added === null
+            ? 'The recipe was accepted but the new line could not be identified afterwards; check it with get_day_entries before logging it again.'
+            : matches === false
+              ? 'The energy of the line differs from the expected share of the recipe. Check it with get_day_entries; delete_diary_entry removes it.'
+              : undefined,
       });
     }),
   );
@@ -479,6 +495,7 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       description:
         'List the ingredients of one of the user\'s saved recipes, each with its amount and nutrition, plus the totals for the whole recipe (not per portion). Read-only. ' +
         'A diary line logged from a recipe only shows the recipe\'s name, so use this to answer "how much protein comes from what in my bábovka". Find the recipe id with list_my_meals. ' +
+        'total_weight_g and portions (null when the author set none) are what log_meal needs to log a part of the recipe. ' +
         'An ingredient the site gives no figures for has null nutrition and is counted in unknown_ingredients; the totals then cover the known ones only.',
       inputSchema: { meal_id: z.string().min(1).describe('Recipe id from list_my_meals.') },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -492,6 +509,8 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       return json({
         meal_id: meal.id,
         title: meal.title,
+        total_weight_g: meal.totalWeight,
+        portions: meal.portions,
         ingredients: meal.ingredients.map(i => ({
           title: i.title,
           amount: i.amount,

@@ -6,8 +6,8 @@
  *   npm run build && KT_EMAIL=... KT_PASSWORD=... node scripts/smoke.mjs
  *   ... node scripts/smoke.mjs --write      # also exercises the write paths
  *
- * Default mode only reads. With --write, every write happens on TOMORROW, which
- * must be completely empty (the run aborts otherwise), and every entry, note
+ * Default mode only reads. With --write, every write happens on the first day from
+ * tomorrow on that, together with the day after it, is completely empty (the run aborts if there is none within two weeks), and every entry, note
  * and activity created is deleted again; a favourite is added and removed for a
  * food that was not one; the latest weight is re-saved with its own value; a test
  * body-measurement tracker is started and removed again (only when none of that
@@ -46,7 +46,7 @@ const shift = (date, days) => {
 };
 
 const today = todayCzech();
-const tomorrow = shift(today, 1);
+let tomorrow = shift(today, 1); // in --write mode this becomes the first empty test day (see below)
 const weekAgo = shift(today, -6);
 console.log(`today ${today}, tomorrow ${tomorrow}, mode: ${WRITE ? 'READ + WRITE (tomorrow only)' : 'read-only'}`);
 
@@ -171,6 +171,13 @@ ok('90 days allowed for aggregates', enumerateDays(shift(today, -89), today, 90)
 
 // ------------------------------------------------------------------ writes
 if (WRITE) {
+  // The user plans meals ahead, so tomorrow may hold real data. Use the first day (from tomorrow on) that, together
+  // with the day after it, is completely empty; nothing is ever written to a day that has content.
+  const isEmpty = async d => { const x = await client.getDayEntries(d, { fresh: true }); return x.entryCount + (x.notes?.length ?? 0) + (x.activities?.length ?? 0) + x.meals.reduce((n, m) => n + (m.notes?.length ?? 0), 0) === 0; };
+  for (let offset = 1; offset <= 14; offset += 1) {
+    const d = shift(today, offset);
+    if ((await isEmpty(d)) && (await isEmpty(shift(d, 1)))) { tomorrow = d; break; }
+  }
   section(`Writes on ${tomorrow} (must be empty; everything is removed again)`);
   const before = await client.getDayEntries(tomorrow, { fresh: true });
   const dirty = before.entryCount + (before.notes?.length ?? 0) + (before.activities?.length ?? 0) + before.meals.reduce((n, m) => n + (m.notes?.length ?? 0), 0);
@@ -446,6 +453,36 @@ if (WRITE) {
       if (mealId) await client.deleteMeal(mealId).catch(err => ok('cleanup recipe', false, err.message));
       const left = await client.listMeals();
       ok('the saved recipes are as before', left.length === mealsBefore.length && left.every(m => mealsBefore.some(b => b.id === m.id)), `${left.length} recipes`);
+    }
+  }
+
+  // saving part of a saved recipe: use one of the user's own recipes that has a portion count and delete the lines again
+  {
+    const withPortions = [];
+    for (const m of await client.listMeals()) {
+      const d = await client.getMealDetails(m.id);
+      if (d.portions !== null && d.portions > 1 && m.energy !== null && d.ingredients.length > 0) withPortions.push({ m, d });
+    }
+    const pick = withPortions[0];
+    if (!pick) {
+      console.log('SKIP  no saved recipe with a portion count — partial recipe logging not tested');
+    } else {
+      const { m, d } = pick;
+      try {
+        const one = await client.logMeal({ mealId: m.id, meal: '1', date: tomorrow, portions: 1 });
+        ok('one portion of a recipe has about its share of the energy', one.added !== null && Math.abs(one.added.energy - m.energy / d.portions) <= Math.max(3, (m.energy / d.portions) * 0.03), `${one.added?.energy} vs ${(m.energy / d.portions).toFixed(1)} kcal, shown as "${one.added?.quantity.raw}"`);
+        const half = await client.logMeal({ mealId: m.id, meal: '1', date: tomorrow, percent: 50 });
+        ok('half of a recipe has half of the energy', half.added !== null && Math.abs(half.added.energy - m.energy / 2) <= Math.max(3, (m.energy / 2) * 0.03), `${half.added?.energy} vs ${(m.energy / 2).toFixed(1)} kcal`);
+        const grams = await client.logMeal({ mealId: m.id, meal: '1', date: tomorrow, grams: Math.round(d.totalWeight / 4) });
+        ok('a quarter of the weight has a quarter of the energy', grams.added !== null && Math.abs(grams.added.energy - m.energy / 4) <= Math.max(4, (m.energy / 4) * 0.04), `${grams.added?.energy} vs ${(m.energy / 4).toFixed(1)} kcal, shown as "${grams.added?.quantity.raw}"`);
+      } catch (e) {
+        ok('partial recipe logging completed', false, e.message);
+      } finally {
+        const x = await client.getDayEntries(tomorrow, { fresh: true });
+        for (const mm of x.meals) for (const e of mm.entries) await client.deleteDiaryEntry({ date: tomorrow, entryId: e.id }).catch(err => ok('cleanup entry', false, err.message));
+        ok('the test day is empty again after the recipe lines', (await client.getDayEntries(tomorrow, { fresh: true })).entryCount === 0);
+        ok('the recipe itself is unchanged', (await client.listMeals()).find(x2 => x2.id === m.id)?.energy === m.energy);
+      }
     }
   }
 
