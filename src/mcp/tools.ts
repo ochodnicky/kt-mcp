@@ -60,14 +60,25 @@ function guard<Args>(name: string, fn: (args: Args) => Promise<ReturnType<typeof
   return async (args: Args) => {
     try {
       const result = await fn(args);
-      console.log(`[tool] ${name} ${JSON.stringify(args)} -> ok`);
+      console.log(`[tool] ${name} ${JSON.stringify(loggableArgs(args))} -> ok`);
       return result;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(`[tool] ${name} ${JSON.stringify(args)} -> ${message}`);
+      console.error(`[tool] ${name} ${JSON.stringify(loggableArgs(args))} -> ${message}`);
       return failure(error);
     }
   };
+}
+
+/**
+ * A tool declared WITHOUT an input schema receives the SDK's request context as
+ * its first argument — including the caller's OAuth access token (authInfo) and
+ * request headers. That must never reach a log line, so such an object is logged
+ * as empty. Real arguments (parsed by zod) never carry these keys.
+ */
+export function loggableArgs(args: unknown): unknown {
+  if (typeof args === 'object' && args !== null && ('signal' in args || 'authInfo' in args || 'requestInfo' in args)) return {};
+  return args;
 }
 
 export function registerTools(server: McpServer, kt: KtClient): void {
