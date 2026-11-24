@@ -10,6 +10,7 @@ import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   type DayBalance,
+  assertCalendarDate,
   type DiaryActivity,
   type DiaryDay,
   type DiaryEntry,
@@ -25,6 +26,8 @@ import {
 } from '../kt/client.js';
 import { summarizeBalances } from '../kt/balance.js';
 import { entriesToCsv } from '../kt/export.js';
+import { shiftDate } from '../kt/util.js';
+import { ACTIVITY_LEVELS, GOAL_MODES, type GoalMode, type Goals, NUTRIENT_CODES, effectiveBasal, effectiveEnergyGoal, goalWarnings, macroEnergy } from '../kt/goals.js';
 import { RANKABLE_NUTRIENTS, rankNutrient } from '../kt/ranking.js';
 
 const MEAL_IDS = Object.keys(MEALS) as [MealId, ...MealId[]];
@@ -607,6 +610,114 @@ export function registerTools(server: McpServer, kt: KtClient): void {
   );
 
   // ---------------------------------------------------------------------
+  // Goals and energy model
+  // ---------------------------------------------------------------------
+
+  server.registerTool(
+    'get_goals',
+    {
+      title: 'Get my goals and body settings',
+      description:
+        'The user\'s goals as set in kaloricketabulky.cz: goal (lose / maintain / gain), current and target weight, activity level (the flat allowance multiplier), basal metabolism and daily energy goal (the site\'s calculation and the user\'s own override, if any), ' +
+        'and the nutrient goals (recommended vs. own, in grams or % of energy). Read-only. Call it first whenever the user asks to review or change their goals, deficit or macros. ' +
+        'in_use_today holds what the diary really applies (read from the day balance and worked back to a day without activities; the site_calculation figures can be stale once an own basal is set). ' +
+        'Observed on the account this was built on: maintenance intake = basal metabolism × activity level, and in lose mode the goal was that minus a 15 % planned deficit; a day\'s goal rises with its logged activities. ' +
+        'Warnings point out inconsistencies, e.g. nutrient goals that do not add up to the energy goal.',
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_goals', async () => json(presentGoals(await kt.getGoals()))),
+  );
+
+  server.registerTool(
+    'update_goals',
+    {
+      title: 'Change my goals',
+      description:
+        'Change goals and body settings in the user\'s real kaloricketabulky.cz account: goal mode, target weight, activity level, own basal metabolism, own daily energy goal, own nutrient goals, drinking goal. ' +
+        'Only the fields you pass change; null on an own_* field or target weight clears it, so the site calculates it again. ' +
+        'ALWAYS call get_goals first, explain the change and its reason, and call this only after the user agreed. Make one coherent change at a time and, after changing, tell the user the before and after. ' +
+        'Energy values are in the account\'s own unit (see energy_unit in get_goals, usually kcal); the site stores kJ, so a value can come back rounded by one. ' +
+        'What moves the energy goal (observed on the account this was built on): activity_level and own_basal change the maintenance intake and the goal follows, in lose mode at a 15 % deficit below maintenance. ' +
+        'own_target_energy overrides all of that with a fixed number and switches the site\'s deficit model OFF (no maintenance or planned deficit is shown, and energy spent is reported as equal to the goal), so use it only when the user explicitly wants a fixed figure; null brings the model back. ' +
+        'Nutrient goals: grams per nutrient, or percent of energy (whole numbers) for protein, carbohydrate and fat, which must then all three be given and sum to at most 100. ' +
+        'The result reports before, after, anything the site did not take, and warnings (for example a goal below basal metabolism). It does not touch the e-mail, password, weight or any other setting.',
+      inputSchema: {
+        mode: z.enum(Object.keys(GOAL_MODES) as [GoalMode, ...GoalMode[]]).optional().describe('lose, maintain or gain.'),
+        target_weight_kg: z.number().min(30).max(300).nullable().optional().describe('Target weight in kg. null clears it.'),
+        activity_level: z
+          .union(ACTIVITY_LEVELS.map(l => z.literal(l.value)) as [z.ZodLiteral<number>, z.ZodLiteral<number>, ...z.ZodLiteral<number>[]])
+          .optional()
+          .describe(`The flat activity multiplier on basal metabolism: ${ACTIVITY_LEVELS.map(l => `${l.value} = ${l.label}`).join('; ')}.`),
+        consider_activity: z.boolean().optional().describe('Whether logged activities add to the energy spent.'),
+        own_basal: z.number().positive().nullable().optional().describe('Own basal metabolism, in the account\'s energy unit. null goes back to the site\'s calculation.'),
+        own_target_energy: z.number().positive().nullable().optional().describe('Own daily energy goal, in the account\'s energy unit. null goes back to the site\'s calculation.'),
+        drink_liters: z.number().min(0.5).max(10).nullable().optional().describe('Daily drinking goal in litres. null clears it.'),
+        nutrients: z
+          .array(
+            z.object({
+              code: z.enum(NUTRIENT_CODES).describe('protein, carbohydrate, fat, fiber, sugar, salt, calcium, saturatedFattyAcid or phe.'),
+              grams: z.number().positive().max(2000).nullable().optional().describe('Own goal in grams per day. null clears it.'),
+              percent: z.number().int().min(1).max(100).nullable().optional().describe('Own goal as % of energy; only protein, carbohydrate, fat, and only all three together.'),
+              active: z.boolean().optional().describe('Show this nutrient in the diary and statistics.'),
+            }),
+          )
+          .min(1)
+          .optional()
+          .describe('Nutrient goals to change; nutrients not listed stay as they are.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    guard('update_goals', async a => {
+      const r = await kt.updateGoals({
+        mode: a.mode,
+        targetWeightKg: a.target_weight_kg,
+        activityLevel: a.activity_level,
+        considerActivity: a.consider_activity,
+        ownBasal: a.own_basal,
+        ownTargetEnergy: a.own_target_energy,
+        drinkLiters: a.drink_liters,
+        nutrients: a.nutrients?.map(n => ({ code: n.code, grams: n.grams, percent: n.percent, active: n.active })),
+      });
+      return json({
+        updated: true,
+        changed: r.changed,
+        not_applied: r.notApplied,
+        before: presentGoals(r.before),
+        after: r.after ? presentGoals(r.after) : null,
+        warnings: r.warnings,
+        note:
+          r.after === null
+            ? 'The change was sent but could not be read back; check it with get_goals.'
+            : r.notApplied.length > 0
+              ? 'Some fields were not taken over by the site; see not_applied.'
+              : undefined,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'get_energy_model',
+    {
+      title: 'Estimate what my body really spends',
+      description:
+        'Works out the user\'s real energy expenditure from what they logged eating and how their weight moved, and sets it against what the site assumes. Read-only. ' +
+        'Use it when weight is not moving as expected ("my weight is stuck", "is my deficit real?"). ' +
+        'difference_from_site negative means the body spends less than the site assumes, so the real deficit is smaller than planned. ' +
+        'Always read confidence and caveats to the user: the estimate needs a nearly complete diary and several weigh-ins, and days with nothing logged are skipped. Today is never counted.',
+      inputSchema: {
+        weeks: z.number().int().min(2).max(12).optional().describe('How many weeks to look back. Defaults to 4.'),
+        to: z.string().optional().describe('Last day, dd.MM.yyyy. Defaults to yesterday.'),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_energy_model', async ({ weeks, to }) => {
+      const end = to === undefined ? shiftDate(todayCzech(), -1) : assertCalendarDate(to);
+      const start = shiftDate(end, -((weeks ?? 4) * 7 - 1));
+      return json(await kt.getEnergyModel(start, end));
+    }),
+  );
+
+  // ---------------------------------------------------------------------
   // Favourites
   // ---------------------------------------------------------------------
 
@@ -958,5 +1069,49 @@ function presentBalance(b: DayBalance) {
     net_balance: b.netBalance,
     weight: b.weight,
     nutrients: b.nutrients.map(n => ({ code: n.code, title: n.title, unit: n.unit, goal: n.goal, actual: n.actual, percent: n.percent })),
+  };
+}
+
+function presentGoals(g: Goals) {
+  const levelLabel = ACTIVITY_LEVELS.find(l => l.value === g.activityLevel)?.label ?? null;
+  return {
+    goal: g.mode,
+    sex: g.sex,
+    height_cm: g.heightCm,
+    birth_year: g.birthYear,
+    weight_kg: g.weightKg,
+    target_weight_kg: g.targetWeightKg,
+    activity_level: g.activityLevel,
+    activity_level_label: levelLabel,
+    consider_logged_activities: g.considerActivity,
+    energy_unit: g.energyUnit,
+    basal_metabolism: { site_calculation: g.basal.computed, own: g.basal.own, in_use: effectiveBasal(g) },
+    energy_goal: { site_calculation: g.targetEnergy.computed, own: g.targetEnergy.own, in_use: effectiveEnergyGoal(g) },
+    in_use_today:
+      g.effective === null
+        ? null
+        : {
+            note: 'Worked back to a day without activities. todays_activity_energy and energy_goal_including_todays_activities show the day as the diary has it.',
+            energy_goal: g.effective.energyGoal,
+            basal_metabolism: g.effective.basal,
+            maintenance_intake: g.effective.maintenance,
+            planned_deficit: g.effective.plannedDeficit,
+            planned_deficit_percent:
+              g.effective.maintenance && g.effective.plannedDeficit !== null ? Math.round((-g.effective.plannedDeficit / g.effective.maintenance) * 1000) / 10 : null,
+            todays_activity_energy: g.effective.activityEnergy,
+            energy_goal_including_todays_activities: g.effective.energyGoalWithActivities,
+          },
+    own_nutrient_goals_enabled: g.customNutrients,
+    nutrient_goals: g.nutrients.map(n => ({
+      code: n.code,
+      title: n.title,
+      recommended_g: n.recommended,
+      own_g: n.own,
+      own_percent: n.percent,
+      shown: n.active,
+    })),
+    macro_goals_add_up_to: macroEnergy(g) === null ? null : Math.round(macroEnergy(g)!),
+    drinking_goal_liters: g.drinkLiters,
+    warnings: goalWarnings(g),
   };
 }

@@ -141,3 +141,57 @@ export function balancePayload(over: { intake?: string; output?: string; target?
     },
   };
 }
+
+/**
+ * A `/user/settings/profile/form` payload as the site sends it. The personal
+ * fields (e-mail, hash, tokens) are planted fakes so tests can prove they never leave.
+ */
+export function profileForm(over: Record<string, unknown> = {}) {
+  const nutrient = (code: string, title: string, computedValue: string, value: number | null = null) => ({
+    active: true,
+    code,
+    computedValue,
+    ratio: null,
+    sort: 0,
+    title,
+    value,
+  });
+  return {
+    email: 'test@example.invalid',
+    password1: null,
+    password2: null,
+    gopayToken: 'fake-token',
+    guid: 'fake-support-code',
+    agreements: [{ selected: true, type: 'TERMS_AND_CONDITIONS' }],
+    lang: 'cs',
+    sex: 'M',
+    height: 175,
+    year: 1992,
+    weight: 81.9,
+    targetWeight: 72,
+    mode: 1,
+    amr: 1.2,
+    considerActivity: true,
+    energyUnit: 'kcal',
+    computedBasal: '1 748',
+    computedTargetEnergy: '1 783',
+    ownBasal: null,
+    ownTargetEnergy: null,
+    ownDailyDose: true,
+    ownNutrients: [
+      nutrient('protein', 'Bílkoviny', '123', 144),
+      nutrient('carbohydrate', 'Sacharidy', '189', 163),
+      nutrient('fat', 'Tuky', '55,5', 55),
+      nutrient('fiber', 'Vláknina', '27,5', 28),
+      nutrient('sugar', 'Cukry', '35,8'),
+    ],
+    drinkRegime: 3.28,
+    modeOpen: false,
+    targetWeightOpen: false,
+    amrOpen: false,
+    ownBasalOpen: false,
+    ownTargetEnergyOpen: false,
+    weightOpen: false,
+    ...over,
+  };
+}

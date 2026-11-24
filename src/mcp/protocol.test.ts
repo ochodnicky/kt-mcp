@@ -30,6 +30,7 @@ const EXPECTED_TOOLS = [
   'list_favorite_foods', 'list_common_foods', 'add_favorite_food', 'remove_favorite_food',
   'search_activity', 'log_activity', 'delete_activity', 'add_diary_note', 'delete_diary_note',
   'copy_meal', 'copy_day', 'export_diary_csv',
+  'get_goals', 'update_goals', 'get_energy_model',
 ];
 
 test('the SDK lists every tool, old and new, each with a description and an input schema', async () => {
@@ -57,6 +58,16 @@ test('arguments are validated by the SDK before a handler runs', async () => {
   assert.ok(bad instanceof Error || (bad as { isError?: boolean }).isError, 'an unknown nutrient must be refused');
   const badMeal = await client.callTool({ name: 'add_diary_note', arguments: { date: '10.11.2026', text: 'x', meal: '9' } }).catch(e => e);
   assert.ok(badMeal instanceof Error || (badMeal as { isError?: boolean }).isError, 'an unknown meal must be refused');
+  assert.equal(called, false);
+});
+
+test('update_goals refuses values the site has no option for, before the handler runs', async () => {
+  let called = false;
+  const client = await connect({ updateGoals: async () => ((called = true), {}) } as unknown as Partial<KtClient>);
+  for (const args of [{ activity_level: 1.3 }, { mode: 'bulk' }, { nutrients: [{ code: 'vitamin-c', grams: 1 }] }, { nutrients: [] }, { own_target_energy: -5 }]) {
+    const r = await client.callTool({ name: 'update_goals', arguments: args }).catch(e => e);
+    assert.ok(r instanceof Error || (r as { isError?: boolean }).isError, JSON.stringify(args));
+  }
   assert.equal(called, false);
 });
 
@@ -90,7 +101,7 @@ test('a handler error reaches the client as a tool error, not a protocol failure
 test('the SDK lists and serves the prompts', async () => {
   const client = await connect({});
   const { prompts } = await client.listPrompts();
-  assert.deepEqual(prompts.map(p => p.name).sort(), ['log_favorite', 'weekly_review']);
+  assert.deepEqual(prompts.map(p => p.name).sort(), ['log_favorite', 'plateau_review', 'weekly_review']);
   const fav = prompts.find(p => p.name === 'log_favorite');
   assert.equal(fav?.arguments?.find(a => a.name === 'food')?.required, true);
   assert.equal(fav?.arguments?.find(a => a.name === 'meal')?.required, false);

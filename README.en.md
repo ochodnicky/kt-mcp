@@ -45,6 +45,8 @@ Once connected, food logging stops being a chore of tapping through search scree
 
 - **Correct and complete.** "That quark was 250 g, not 200." "Delete today's afternoon snack." "Log a half-hour walk." "Add a note to lunch that it was a restaurant." "Record today's weight as 81.7 kg."
 
+- **Work out why your weight is stuck.** "My weight isn't moving, find out why and suggest changes to my goals." The agent reads your goals (`get_goals`), estimates from your diary and weight trend what your body really spends and compares it with what the site assumes (`get_energy_model`). It then proposes a concrete change (activity level, own basal, macros) and **writes it only after you agree** (`update_goals`). The `plateau_review` prompt does this in one go.
+
 - **Get the data into a spreadsheet.** "Export the last 30 days as CSV." Paste the result into Excel or Google Sheets.
 
 ## Tools
@@ -90,6 +92,14 @@ Tools that **change the diary** are marked ✏️. The agent should call them on
 | `add_diary_note` ✏️ / `delete_diary_note` ✏️ | Add a note to a whole day or to one meal / delete it. |
 | `log_weight` ✏️ | Record a body weight. The site keeps one value per date, so it replaces any existing one. |
 
+### Goals and energy estimate
+
+| Tool | Purpose |
+|---|---|
+| `get_goals` | Goal (lose / maintain / gain), weight and target weight, activity level, basal metabolism and daily energy goal (the site's calculation and the user's own override), nutrient goals in grams and %, and the drinking goal. `in_use_today` shows what the diary really applies today. Warnings flag things such as macros that do not add up to the energy goal. Reads a fixed set of fields only; e-mail, password, agreements and tokens are never returned. |
+| `update_goals` ✏️ | Change the goal, target weight, activity level (1; 1.2; 1.375; 1.55; 1.725; 1.9), own basal, own energy goal, nutrient goals (grams, or % for protein, carbohydrate and fat together) and the drinking goal. Only the fields passed change; `null` clears an own value. Returns before, after, what the site did not take and warnings. It never touches weight, e-mail or password. |
+| `get_energy_model` (`weeks`, `to`) | Estimates what the body really spends: average intake plus the energy released by the weight trend (1 kg ≈ 7,700 kcal), set against the expenditure the site assumes. Returns the margin, a confidence (`low` / `medium` / `high`) and caveats. Today is not counted. |
+
 ### Recipes
 
 | Tool | Purpose |
@@ -107,6 +117,7 @@ Clients that support MCP prompts offer these as ready-made shortcuts:
 | Prompt | What it does |
 |---|---|
 | `weekly_review` (`from`, `to` optional) | A weekly review (default: the last 7 days): average intake, energy spent and balance, protein against goal, main protein sources and weight trend. |
+| `plateau_review` (`weeks` optional, 2–12, default 4) | "Why is my weight not moving?": goals, expenditure estimate, logged days and weight trend → the most likely cause → at most two concrete changes. **Changes nothing until you confirm.** |
 | `log_favorite` (`food`, `amount`, `meal`, `date`) | Finds a favourite food, picks the portion and asks for confirmation before logging. |
 
 ### Examples: what you say and what the agent calls
@@ -126,11 +137,16 @@ Clients that support MCP prompts offer these as ready-made shortcuts:
 | "Record my weight as 81.7 kg." | `log_weight` |
 | "Export the last 30 days as CSV." | `export_diary_csv` |
 | "Give me a weekly review." | the `weekly_review` prompt |
+| "What are my goals, and do the macros match the calories?" | `get_goals` |
+| "My weight is stuck, find out why and suggest changes." | the `plateau_review` prompt → `get_goals` → `get_energy_model` → (after you agree) `update_goals` |
+| "Set carbs to 178 g so it matches the goal." | `get_goals` → `update_goals` |
+| "Change my activity level to lightly active." | `get_goals` → `update_goals` |
 
 ### How writes are guarded
 
 - Tools that change or delete an existing record (`update_*`, `delete_*`) always **re-read the day first** and check that the `entry_id`, `activity_id` or `note_id` is really on it. Only **one** item is changed or deleted per call; a comma-separated list of ids is refused.
 - After a write the day is **re-read** and the result (`confirmed_gone`, `entries_added_to_target_day`, …) goes back to the agent. If only that follow-up read fails, the write is **not reported as an error**, so the agent doesn't repeat it; the result is `null` with a note to check it.
+- `update_goals` reads the profile fresh, changes only the fields passed and sends the rest of the form back as it came (the site saves the whole form at once). Out-of-range values and impossible combinations (for example percentages for only some macros, or a sum above 100) are refused before anything is sent. After the write the profile is read again and any field the site did not take is reported.
 - Every tool that takes a date rejects days that do not exist; the site silently rolls `31.02.2026` over to 3 March.
 - Copying and adding notes or activities is not idempotent. The tool descriptions tell the agent so, and a failed `copy_day` reports what was already copied.
 
@@ -155,11 +171,11 @@ npm run smoke              # read-only
 npm run smoke -- --write   # also the write paths, see below
 ```
 
-With `--write`, every write happens on **tomorrow only**, which must be completely empty (the script stops otherwise). It logs and edits a food, adds notes and an activity, copies a meal — and deletes all of it again; it adds and removes a favourite food that was not one, and re-saves the latest weight with its own value. It ends by checking tomorrow is empty again. Today and earlier days are never modified. Exit code 1 means a check failed.
+With `--write`, every write happens on **tomorrow only**, which must be completely empty (the script stops otherwise). It logs and edits a food, adds notes and an activity, copies a meal — and deletes all of it again; it adds and removes a favourite food that was not one, and re-saves the latest weight with its own value. It also temporarily changes the drinking goal, an own basal and one carbohydrate goal, checks they show up in the diary's energy goal, puts them back and compares the whole goals block with its original state (including checking that saving the profile did not add a weigh-in). It ends by checking tomorrow is empty again. Today and earlier days are never modified. Exit code 1 means a check failed.
 
 ### Not implemented yet
 
-The site can do more than is offered here. Deliberately missing: editing a saved recipe or lines logged from one (the site handles them with an intricate form), custom foods and custom activities entered by hand, editing activities (only add and delete), water intake, sharing, day templates, and the site's native XLS/PDF export (`export_diary_csv` replaces it).
+The site can do more than is offered here. Deliberately missing: editing a saved recipe or lines logged from one (the site handles them with an intricate form), custom foods and custom activities entered by hand, editing activities (only add and delete), logging litres drunk (setting the drinking goal works), tracked measurements (waist and so on), regular activities, e-mail, password and other account settings, sharing, day templates, and the site's native XLS/PDF export (`export_diary_csv` replaces it).
 
 ### Recipes: quantities
 
@@ -353,6 +369,9 @@ on the form before authorizing.
 - **`get_day_summary` does not contain individual entries.** It returns day totals, goals, profile values and weekly charts, and passes the site's response through unmodified because its shape isn't fully documented. The entries come from `get_day_entries` and `get_diary_range`, which read `/user/diary/{dd.MM.yyyy}/get`, the endpoint the site's own diary page uses.
 - **Reading a day's entries is based on observation, not documentation.** The response shape was derived from one account over 30 days, and the client throws on any deviation. The site sends the quantity only as display text (`3 x kus (19 g)`); `quantity.raw` is always that text, and the numbers derived from it are `null` when it could not be read (some entries have no quantity at all). A saved recipe is recognised by the line carrying a saved-meal id, which has been confirmed on only a handful of entries. An empty day cannot tell "ate nothing" from "logged nothing". The day-level totals the site sends in the same response were 0 on days that had entries, so they are not used.
 - **Every tool that takes a date rejects days that do not exist.** The site silently rolls `31.02.2026` over to 3 March, so a write or read would land on a different day.
+- **How the site works out goals (measured on a real account).** Maintenance intake = basal metabolism × activity level; in "lose" mode the goal is a fixed 15 % lower. Changing the activity level from 1.2 to 1.375 raised the goal from 1,783 to 2,043 kcal; an own basal of 1,600 lowered it to 1,632. **An own energy goal switches the model off:** the site then shows no maintenance intake or deficit and reports the goal itself as "energy spent". Days on which the account had an own goal are therefore left out of `site_expenditure` in `get_energy_model`. The "computed" values in the profile form are not recalculated once an own basal is set, which is why `get_goals` also returns `in_use_today` from the day balance. The site stores energy in kJ, so a value can come back off by one (1,750 → 1,749).
+- **`get_energy_model` is an estimate, not a measurement.** It needs a nearly complete diary and several weigh-ins under comparable conditions; day-to-day water swings of a kilogram can outweigh real change over a short period. The result always carries a confidence, the margin of the weight trend and a list of caveats. Days with nothing logged are skipped, so with an incomplete diary the real intake and expenditure are higher than shown.
+- **Writing goals was verified live on a real account**: the drinking goal, an own basal and a carbohydrate goal were changed, showed up in the diary's energy goal, and were then put back to their original state; saving the profile did not add a weigh-in. Not verified: setting macros as percentages, changing the goal mode (lose/maintain/gain), and an own energy goal beyond an immediate revert.
 - **Writes use the endpoints the site's own pages use and were verified live on a real account**, always reversibly: changing a quantity (including switching unit) and deleting an entry, copying a meal, adding and deleting a note (whole-day and per-meal), adding and deleting an activity, adding and removing a favourite food. `log_weight` was verified only by re-saving the same value for the same date (the site keeps one value per date; writing a new value could not be undone, so it was not tried). Not verified: deleting a line logged from a saved recipe, a `copy_day` over more than the test covered, and activities measured in a unit other than hours (`log_activity` refuses those).
 - **The site deletes through a plain `GET`.** So the `delete_*` tools always check that the id is on the given day before deleting and re-read the day afterwards.
 - **Balance.** `planned_deficit` is the site's "Kalorický deficit", i.e. goal minus maintenance intake, not how the day actually came out; the actual difference is `net_balance` (intake minus output, computed by the server). An intake of 0 means nothing was logged; the site cannot tell "ate nothing" from "logged nothing", so the averages in `get_balance_range` cover only days with a non-zero intake.

@@ -90,6 +90,7 @@ app.post('/mcp', requireAuth, async (req, res) => {
         'When the user gives a count rather than a weight ("3 eggs"), call get_food_portions and log a natural portion unit instead of estimating grams. ' +
         'When they say "my favourite ..." or "my usual ...", call list_favorite_foods first. ' +
         'For questions about what they ate, use get_day_entries / get_diary_range / get_nutrient_ranking; for trends, get_balance_range and get_weight_history. ' +
+        'For goals, deficit, basal metabolism or macros, call get_goals first; when the weight is not moving as expected, use get_energy_model. update_goals changes the user\'s real settings: explain the change and get agreement before calling it. ' +
         'Tools that change the diary (log_*, update_*, delete_*, copy_*, add_*) write to their real diary: confirm first when anything is ambiguous, and never retry a write blindly.',
     },
   );

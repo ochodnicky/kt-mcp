@@ -11,6 +11,11 @@
  */
 
 import { createHash } from 'node:crypto';
+import { type EnergyModel, estimateEnergyModel, type WeightPoint } from './energy.js';
+import { applyGoalsChange, effectiveFromBalance, type Goals, type GoalsChange, goalWarnings, parseGoals, unappliedChanges } from './goals.js';
+import { KtAuthError, KtError, isRecord, parseCzechNumber } from './util.js';
+
+export { KtAuthError, KtError, parseCzechNumber };
 
 const BASE = 'https://www.kaloricketabulky.cz';
 const UA = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36';
@@ -83,14 +88,6 @@ export interface MealSummary {
   energyUnit: string;
   portions: number;
 }
-
-export class KtError extends Error {}
-
-/**
- * Login failed, or the session could not be (re)established. Callers that loop
- * over many requests abort on this instead of retrying the login every time.
- */
-export class KtAuthError extends KtError {}
 
 /** One logged diary line, as the site's diary page shows it. */
 export interface EntryQuantity {
@@ -351,20 +348,6 @@ export function baseUnitOf(units: UnitOption[]): string {
   return units.find(u => u.grams === 0 || u.grams === 1)?.id ?? GRAM_UNIT;
 }
 
-/**
- * Czech number formatting: decimal comma, thin/regular space as the thousands
- * separator ("1 043", "20,43"). Returns null for absent or unparseable values
- * rather than a misleading 0.
- */
-export function parseCzechNumber(value: unknown): number | null {
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  if (typeof value !== 'string') return null;
-  const normalised = value.replace(/[\s  ]/g, '').replace(',', '.');
-  if (normalised === '') return null;
-  const n = Number(normalised);
-  return Number.isFinite(n) ? n : null;
-}
-
 /** The site formats dates as dd.MM.yyyy everywhere. */
 export function formatCzechDate(date: Date): string {
   const dd = String(date.getDate()).padStart(2, '0');
@@ -519,10 +502,6 @@ export function parseQuantity(raw: unknown): EntryQuantity {
   m = QUANTITY_PATTERNS.label.exec(text);
   if (m?.[1]) return make({ count: 1, label: m[1] });
   return make();
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
 function parseDiaryEntry(raw: unknown, dayEnergyUnit: string, where: string): DiaryEntry {
@@ -1163,6 +1142,78 @@ export class KtClient {
       () => null,
     );
     return { date, requested: args.weightKg, recorded };
+  }
+
+  /**
+   * Every weigh-in the site lists between two days. The site only returns a
+   * month at a time, so it is asked about several days and the answers merged.
+   */
+  async getWeightSeries(from: string, to: string): Promise<WeightPoint[]> {
+    const days = enumerateDays(from, to, MAX_LONG_RANGE_DAYS);
+    const byDate = new Map<string, number>();
+    for (let i = days.length - 1; i >= -1; i -= 25) {
+      const history = await this.getWeightHistory(days[Math.max(i, 0)]);
+      for (const r of history.records) byDate.set(r.date, r.value);
+      if (i <= 0) break;
+    }
+    return days.flatMap(d => (byDate.has(d) ? [{ date: d, kg: byDate.get(d)! }] : []));
+  }
+
+  /**
+   * What the body seems to spend, worked out from intake and weight trend, next
+   * to what the site assumes. Today is left out of the averages: it is not over.
+   */
+  async getEnergyModel(from: string, to: string): Promise<EnergyModel> {
+    const outcomes = await this.getBalanceRange(from, to, MAX_LONG_RANGE_DAYS);
+    const weights = await this.getWeightSeries(from, to);
+    const today = todayCzech();
+    const excludeDates = outcomes.some(o => o.date === today) ? [today] : [];
+    return estimateEnergyModel({ from, to, outcomes, weights, excludeDates });
+  }
+
+  /** The goals and body settings, read fresh (they change rarely and a stale answer would mislead a write). */
+  async getGoals(): Promise<Goals> {
+    return this.withEffectiveFigures(parseGoals(await this.authed('/user/settings/profile/form?format=json')));
+  }
+
+  /** The form's "computed" figures go stale once an own basal is set; today's balance holds what the site really applies. */
+  private async withEffectiveFigures(goals: Goals): Promise<Goals> {
+    goals.effective = await this.getDayBalance(undefined).then(
+      b => effectiveFromBalance(b, goals.considerActivity),
+      () => null,
+    );
+    return goals;
+  }
+
+  /**
+   * Changes goals. The site stores the whole profile form at once, so this reads
+   * it fresh, changes only the requested fields and sends the rest back as it
+   * came. The result is read back and compared with what was asked for.
+   */
+  async updateGoals(change: GoalsChange): Promise<{
+    before: Goals;
+    after: Goals | null;
+    changed: string[];
+    notApplied: string[];
+    warnings: string[];
+  }> {
+    const form = await this.authed('/user/settings/profile/form?format=json');
+    const before = await this.withEffectiveFigures(parseGoals(form));
+    const { body, changed } = applyGoalsChange(form, change);
+    try {
+      await this.authed('/user/settings/profile/edit?=&format=json', { method: 'POST', body });
+    } finally {
+      this.invalidate();
+    }
+    // Best effort: a write that landed is never reported as an error because the read-back failed.
+    const after = await this.getGoals().catch(() => null);
+    return {
+      before,
+      after,
+      changed,
+      notApplied: after ? unappliedChanges(change, after) : [],
+      warnings: after ? goalWarnings(after) : [],
+    };
   }
 
   /** The user's favourite foods. The ids are the same ones search_food returns, so they work with log_food. */

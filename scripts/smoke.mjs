@@ -9,7 +9,9 @@
  * Default mode only reads. With --write, every write happens on TOMORROW, which
  * must be completely empty (the run aborts otherwise), and every entry, note
  * and activity created is deleted again; a favourite is added and removed for a
- * food that was not one; and the latest weight is re-saved with its own value.
+ * food that was not one; the latest weight is re-saved with its own value; and a
+ * few goal values (drinking goal, own basal, one carbohydrate goal) are changed
+ * and put back, with the whole goals block compared to its snapshot.
  * The run ends by checking that tomorrow is empty again. Nothing on today or
  * earlier days is ever modified. Exit code 1 if any check fails.
  */
@@ -19,6 +21,7 @@ const { KtClient, todayCzech, enumerateDays } = await import(dist('kt/client.js'
 const { rankNutrient } = await import(dist('kt/ranking.js'));
 const { summarizeBalances } = await import(dist('kt/balance.js'));
 const { entriesToCsv } = await import(dist('kt/export.js'));
+const { goalWarnings } = await import(dist('kt/goals.js'));
 
 if (!process.env.KT_EMAIL || !process.env.KT_PASSWORD) {
   console.error('Set KT_EMAIL and KT_PASSWORD in the environment first.');
@@ -92,6 +95,16 @@ section('CSV export');
 const { csv, rows } = entriesToCsv(range);
 ok('CSV rows match the entries', rows === range.reduce((n, o) => n + (o.status === 'error' ? 0 : o.day.entryCount), 0), `${rows} rows`);
 ok('CSV has a header', csv.startsWith('date,meal,title'));
+
+section('Goals and energy model');
+const goals = await client.getGoals();
+ok('goals read', ['lose', 'maintain', 'gain'].includes(goals.mode) && goals.nutrients.length > 0, `${goals.mode}, goal ${goals.targetEnergy.own ?? goals.targetEnergy.computed} ${goals.energyUnit}`);
+ok('no personal field in goals', !/@|password|guid|token/i.test(JSON.stringify(goals)));
+console.log('warnings:', goalWarnings(goals).join(' | ') || 'none');
+const modelTo = shift(today, -1);
+const model = await client.getEnergyModel(shift(modelTo, -27), modelTo);
+ok('energy model over 28 days', model.period.days === 28 && model.days.logged <= 28, `confidence ${model.confidence}, implied ${model.impliedExpenditure} vs site ${model.siteExpenditure} ${model.energyUnit}`);
+console.log('caveats:', model.caveats.join(' | ') || 'none');
 
 section('Validation');
 for (const bad of ['31.02.2026', '2026-11-23']) {
@@ -169,6 +182,34 @@ if (WRITE) {
       ok('and removed again', rem.confirmed === true);
     }
     ok('favourites restored', (await client.listFavoriteFoods()).length === favs.length);
+  }
+
+  // goals: change a few harmless values, check, and put every one back
+  {
+    const snapshot = await client.getGoals();
+    const weightRecords = (await client.getWeightHistory(today)).records.length;
+    const carb = snapshot.nutrients.find(n => n.code === 'carbohydrate');
+    try {
+      const r = await client.updateGoals({
+        drinkLiters: snapshot.drinkLiters === 3.3 ? 3.4 : 3.3,
+        ownBasal: 1750,
+        ...(carb && carb.own !== null ? { nutrients: [{ code: 'carbohydrate', grams: carb.own + 1 }] } : {}),
+      });
+      ok('goals changed and read back', r.notApplied.length === 0 && Math.abs((r.after?.basal.own ?? 0) - 1750) <= 1, `changed ${r.changed.join(', ')}`);
+      ok('the diary\'s energy goal follows the own basal', r.after?.effective?.energyGoal !== snapshot.effective?.energyGoal, `${snapshot.effective?.energyGoal} -> ${r.after?.effective?.energyGoal}`);
+    } finally {
+      const back = await client.updateGoals({
+        drinkLiters: snapshot.drinkLiters,
+        ownBasal: snapshot.basal.own,
+        ...(carb && carb.own !== null ? { nutrients: [{ code: 'carbohydrate', grams: carb.own }] } : {}),
+      });
+      ok('goals restored', back.notApplied.length === 0);
+    }
+    const restored = await client.getGoals();
+    const bare = g => JSON.stringify({ ...g, effective: undefined });
+    ok('goals identical to before', bare(restored) === bare(snapshot));
+    ok('effective figures restored', restored.effective?.energyGoal === snapshot.effective?.energyGoal && restored.effective?.maintenance === snapshot.effective?.maintenance);
+    ok('no weigh-in was added by saving the profile', (await client.getWeightHistory(today)).records.length === weightRecords);
   }
 
   // weight: re-save the latest record with its own value — one record per date, so nothing changes

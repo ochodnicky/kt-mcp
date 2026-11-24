@@ -45,6 +45,8 @@ Jakmile je agent připojený, přestane být zapisování jídel otravným prokl
 
 - **Opravujte a doplňujte.** „Ten tvaroh byl 250 g, ne 200." „Smaž dnešní svačinu." „Zapiš půlhodinovou chůzi." „Přidej k obědu poznámku, že to byla restaurace." „Zapiš dnešní váhu 81,7 kg."
 
+- **Řešte, když váha nejde dolů.** „Váha mi stojí, zjisti proč a navrhni úpravu cílů." Agent načte cíle (`get_goals`), odhadne z jídelníčku a vývoje váhy, kolik tělo opravdu spaluje, a porovná to s tím, co předpokládá web (`get_energy_model`). Pak navrhne konkrétní změnu (úroveň aktivity, vlastní bazál, makra) a **zapíše ji až po vašem souhlasu** (`update_goals`). Doporučené je spustit prompt `plateau_review`.
+
 - **Vytáhněte data do tabulky.** „Exportuj posledních 30 dní do CSV." Výsledek vložíte do Excelu nebo Google Sheets.
 
 ## Nástroje
@@ -90,6 +92,14 @@ Nástroje, které **mění deník**, jsou označené ✏️. Agent by je měl vo
 | `add_diary_note` ✏️ / `delete_diary_note` ✏️ | Přidá poznámku k celému dni nebo k jednomu jídlu, resp. ji smaže. |
 | `log_weight` ✏️ | Zapíše hmotnost. Web drží jednu hodnotu na datum, takže přepíše případnou existující. |
 
+### Cíle a odhad výdeje
+
+| Nástroj | Účel |
+|---|---|
+| `get_goals` | Cíl (zhubnout / udržet / nabrat), váha a cílová váha, úroveň aktivity, bazální metabolismus a kalorický cíl (výpočet webu i vlastní hodnota), cíle živin v gramech i v % a pitný režim. Pole `in_use_today` ukazuje, co deník dnes skutečně používá. Varování upozorní třeba na makra, která nedávají dohromady kalorický cíl. Čte jen vybraná pole; e-mail, heslo, souhlasy a tokeny nevrací. |
+| `update_goals` ✏️ | Změní cíl, cílovou váhu, úroveň aktivity (1; 1,2; 1,375; 1,55; 1,725; 1,9), vlastní bazál, vlastní kalorický cíl, cíle živin (g nebo % pro bílkoviny, sacharidy a tuky společně) a pitný režim. Mění jen předaná pole, `null` vlastní hodnotu zruší. Vrací stav před, po, co web nepřevzal a varování. Váhu, e-mail ani heslo nemění. |
+| `get_energy_model` (`weeks`, `to`) | Odhad skutečného výdeje: průměrný příjem plus energie uvolněná trendem váhy (1 kg ≈ 7 700 kcal) proti výdeji, který předpokládá web. Vrací rozptyl, spolehlivost (`low` / `medium` / `high`) a výhrady. Dnešek se nezapočítává. |
+
 ### Recepty
 
 | Nástroj | Účel |
@@ -108,6 +118,7 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 |---|---|
 | `weekly_review` (`from`, `to` volitelné) | Týdenní rozbor (výchozí: posledních 7 dní): průměrný příjem, výdej a bilance, bílkoviny proti cíli, hlavní zdroje bílkovin a trend váhy. |
 | `log_favorite` (`food`, `amount`, `meal`, `date`) | Najde oblíbenou potravinu, zvolí porci a před zápisem se zeptá na potvrzení. |
+| `plateau_review` (`weeks` volitelné, 2–12, výchozí 4) | „Proč se váha nehýbe?": cíle, odhad výdeje, zapsané dny a trend váhy → nejpravděpodobnější příčina → nejvýš dvě konkrétní změny. **Nic nemění, dokud nepotvrdíte.** |
 
 ### Příklady: co řeknete a co agent zavolá
 
@@ -126,12 +137,17 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 | „Zapiš mi váhu 81,7 kg." | `log_weight` |
 | „Exportuj posledních 30 dní do CSV." | `export_diary_csv` |
 | „Udělej mi týdenní rozbor." | prompt `weekly_review` |
+| „Jaké mám nastavené cíle a sedí makra na kalorie?" | `get_goals` |
+| „Váha mi stojí, zjisti proč a navrhni úpravu." | prompt `plateau_review` → `get_goals` → `get_energy_model` → (po souhlasu) `update_goals` |
+| „Nastav sacharidy na 178 g, ať to vychází na cíl." | `get_goals` → `update_goals` |
+| „Změň úroveň aktivity na lehce aktivní." | `get_goals` → `update_goals` |
 
 ### Jak se zápisy hlídají
 
 - Nástroje, které mění nebo mažou existující záznam (`update_*`, `delete_*`), si vždy nejdřív **načtou den znovu** a ověří, že `entry_id`, `activity_id` nebo `note_id` v něm opravdu je. Smazat nebo upravit se vždy jen **jedna** položka na volání; seznam id oddělených čárkou se nepřijme.
 - Po zápisu se den **načte znovu** a výsledek (`confirmed_gone`, `entries_added_to_target_day`, …) se vrátí agentovi. Selže-li jen tohle dodatečné načtení, zápis se **nehlásí jako chyba**, aby ho agent nezopakoval; vrátí se `null` a poznámka, ať si výsledek zkontroluje.
 - Všechny nástroje s datem odmítají neexistující dny; web `31.02.2026` tiše přepočítá na 3. 3.
+- `update_goals` si profil načte čerstvě, změní jen předaná pole a zbytek formuláře pošle zpět tak, jak přišel (web ukládá celý formulář najednou). Hodnoty mimo rozumný rozsah a nepřípustné kombinace (např. procenta jen u části maker, součet nad 100) odmítne ještě před odesláním. Po zápisu profil přečte znovu a uvede pole, která web nepřevzal.
 - Kopírování a přidávání poznámek a aktivit není idempotentní. Popisy nástrojů to agentovi říkají a výsledek `copy_day` při selhání uvádí, co už se zkopírovalo.
 
 ### Limity a cache
@@ -155,11 +171,11 @@ npm run smoke              # pouze čtení
 npm run smoke -- --write   # navíc zápisy, viz níže
 ```
 
-S `--write` se všechny zápisy dějí **jen na zítřek**, který musí být zcela prázdný (jinak se skript zastaví). Zapíše a upraví potravinu, přidá poznámky a aktivitu, zkopíruje jídlo — a všechno zase smaže; přidá a odebere oblíbenou potravinu, která mezi oblíbenými nebyla, a znovu uloží poslední váhu se stejnou hodnotou. Na konci ověří, že je zítřek zase prázdný. Dnešní ani dřívější dny se nikdy nemění. Návratový kód 1 znamená, že některá kontrola selhala.
+S `--write` se všechny zápisy dějí **jen na zítřek**, který musí být zcela prázdný (jinak se skript zastaví). Zapíše a upraví potravinu, přidá poznámky a aktivitu, zkopíruje jídlo — a všechno zase smaže; přidá a odebere oblíbenou potravinu, která mezi oblíbenými nebyla, a znovu uloží poslední váhu se stejnou hodnotou. Dočasně také změní pitný režim, vlastní bazál a jeden cíl sacharidů, ověří, že se projevily v cíli deníku, vrátí je a porovná celý blok cílů s původním stavem (včetně kontroly, že uložení profilu nepřidalo záznam váhy). Na konci ověří, že je zítřek zase prázdný. Dnešní ani dřívější dny se nikdy nemění. Návratový kód 1 znamená, že některá kontrola selhala.
 
 ### Co zatím není
 
-Web umí víc, než tu dnes nabízíme. Vědomě chybí: úprava uloženého receptu a řádků zapsaných z receptu (web je řeší složitým formulářem), vlastní potravina a vlastní aktivita zadané ručně, úprava aktivit (jen přidání a smazání), pitný režim, sdílení, šablony dne a nativní XLS/PDF export webu (nahrazuje ho `export_diary_csv`).
+Web umí víc, než tu dnes nabízíme. Vědomě chybí: úprava uloženého receptu a řádků zapsaných z receptu (web je řeší složitým formulářem), vlastní potravina a vlastní aktivita zadané ručně, úprava aktivit (jen přidání a smazání), zápis vypitých litrů (pitný cíl nastavit jde), sledované údaje (obvod pasu apod.), pravidelné aktivity, e-mail, heslo a ostatní nastavení účtu, sdílení, šablony dne a nativní XLS/PDF export webu (nahrazuje ho `export_diary_csv`).
 
 ### Recepty: množství
 
@@ -351,6 +367,9 @@ jméno klienta zobrazené ve formuláři.
 - **Čtení položek dne vychází z pozorování, ne z dokumentace.** Tvar odpovědi byl odvozen z jednoho účtu za 30 dní a klient při jakékoli odchylce hlásí chybu. Web posílá množství jen jako zobrazený text (`3 x kus (19 g)`); `quantity.raw` je vždy tento text a z něj odvozená čísla jsou `null`, když se text nepodařilo přečíst (některé záznamy množství nemají vůbec). Uložený recept se pozná podle toho, že řádek nese id uloženého jídla, a to je ověřené jen na několika záznamech. Prázdný den neodliší „nejedl jsem nic" od „nezapsal jsem nic". Součty za celý den, které web v téže odpovědi posílá, byly u dnů s položkami nulové, a proto se nepoužívají.
 - **Všechny nástroje s datem odmítají neexistující dny.** Web `31.02.2026` tiše přepočítá na 3. 3., takže by se zápis nebo čtení provedlo na jiný den.
 - **Zápisy vycházejí z endpointů, které používá web, a byly ověřeny živě na vlastním účtu**, vždy vratně: úprava množství včetně změny jednotky a smazání položky, kopírování jídla, přidání a smazání poznámky (celodenní i k jídlu), přidání a smazání aktivity, přidání a odebrání oblíbené potraviny. `log_weight` byl ověřen jen tím, že se znovu uložila stejná hodnota ke stejnému datu (web drží jedinou hodnotu na datum; zápis nové hodnoty nešlo vrátit zpět, a proto se nezkoušel). Neověřeno: smazání řádku z uloženého receptu, `copy_day` přes víc dnů najednou než v testu a aktivity měřené v jiné jednotce než v hodinách (ty `log_activity` odmítne).
+- **Jak web počítá cíle (změřeno na vlastním účtu).** Udržovací příjem = bazál × úroveň aktivity; v režimu „zhubnout" je cíl o pevných 15 % nižší. Změna úrovně aktivity z 1,2 na 1,375 zvedla cíl z 1 783 na 2 043 kcal, vlastní bazál 1 600 ho snížil na 1 632. **Vlastní kalorický cíl model vypne:** web pak neukazuje udržovací příjem ani deficit a jako „výdej" hlásí samotný cíl. Dny, kdy měl účet vlastní cíl, se proto do odhadu `site_expenditure` v `get_energy_model` nepočítají. Hodnota „computed" ve formuláři profilu se po nastavení vlastního bazálu nepřepočítá, a proto `get_goals` vrací i `in_use_today` z denní bilance. Web ukládá energii v kJ, takže vrácená hodnota se může lišit o 1 (1 750 → 1 749).
+- **`get_energy_model` je odhad, ne měření.** Potřebuje téměř úplný jídelníček a několik vážení za sebou za srovnatelných podmínek; denní výkyvy vody v řádu kilogramu mohou krátké období přebít. Výsledek vždy nese spolehlivost, rozptyl trendu váhy a seznam výhrad. Dny bez zápisu se přeskakují, takže při neúplném zápisu vyjde skutečný příjem i výdej vyšší.
+- **Zápis cílů byl ověřen živě na vlastním účtu**: pitný režim, vlastní bazál a cíl sacharidů se změnily, projevily se v cíli deníku a pak byly vráceny do původního stavu; uložení profilu nepřidalo záznam váhy. Neověřeno: nastavení makra v procentech, změna režimu cíle (zhubnout/udržet/nabrat) a vlastní kalorický cíl se zápisem testoval jen s okamžitým vrácením.
 - **Web maže přes obyčejné `GET`.** Proto `delete_*` nástroje před smazáním vždy ověří, že id je v daném dni, a po smazání den načtou znovu.
 - **Bilance.** `planned_deficit` je údaj „Kalorický deficit" z webu, tedy cíl minus udržovací příjem, ne to, jak den skutečně dopadl; skutečný rozdíl je `net_balance` (příjem minus výdej, počítá ho server). Příjem 0 znamená, že se nic nezapsalo; web nerozliší „nejedl jsem nic" od „nezapsal jsem nic", a proto průměry v `get_balance_range` počítají jen dny s nenulovým příjmem.
 - **Detail receptu** dohledává výživové hodnoty každé suroviny zvlášť (jeden požadavek na surovinu). Surovina, k níž web hodnoty nedá, má `null` a součet se pak týká jen známých.

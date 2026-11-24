@@ -7,6 +7,8 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { KtAuthError, type DayOutcome, type DiaryDay, type KtClient, todayCzech } from '../kt/client.js';
+import type { Goals } from '../kt/goals.js';
+import { shiftDate } from '../kt/util.js';
 import { registerPrompts } from './prompts.js';
 import { registerTools } from './tools.js';
 
@@ -459,7 +461,7 @@ test('the prompts are registered and build sensible instructions', async () => {
       prompts.set(name, { config, handler });
     },
   } as unknown as McpServer);
-  assert.deepEqual([...prompts.keys()].sort(), ['log_favorite', 'weekly_review']);
+  assert.deepEqual([...prompts.keys()].sort(), ['log_favorite', 'plateau_review', 'weekly_review']);
 
   const review = prompts.get('weekly_review')!.handler({ from: '03.11.2026', to: '09.11.2026' }).messages[0]!.content.text;
   assert.match(review, /03\.11\.2026–09\.11\.2026/);
@@ -477,4 +479,94 @@ test('the prompts are registered and build sensible instructions', async () => {
   assert.match(fav, /2 plátky/);
 
   assert.throws(() => prompts.get('weekly_review')!.handler({ from: '31.02.2026' }), /does not exist/);
+
+  const plateau = prompts.get('plateau_review')!.handler({ weeks: '6' }).messages[0]!.content.text;
+  assert.match(plateau, /get_goals/);
+  assert.match(plateau, /get_energy_model with weeks 6/);
+  assert.match(plateau, /Change nothing yet/);
+  assert.match(plateau, /below my basal metabolism or below 1200 kcal/);
+  assert.match(prompts.get('plateau_review')!.handler({ weeks: '99' }).messages[0]!.content.text, /weeks 12/);
+  assert.match(prompts.get('plateau_review')!.handler({}).messages[0]!.content.text, /weeks 4/);
+});
+
+const goals = (over: Record<string, unknown> = {}): Goals => ({
+  sex: 'male', heightCm: 175, birthYear: 1992, weightKg: 81.9, targetWeightKg: 72, mode: 'lose', activityLevel: 1.2, considerActivity: true,
+  energyUnit: 'kcal', basal: { computed: 1748, own: null }, targetEnergy: { computed: 1783, own: null }, customNutrients: true,
+  nutrients: [
+    { code: 'protein', title: 'Bílkoviny', recommended: 123, own: 144, percent: null, active: true },
+    { code: 'carbohydrate', title: 'Sacharidy', recommended: 189, own: 163, percent: null, active: true },
+    { code: 'fat', title: 'Tuky', recommended: 55.5, own: 55, percent: null, active: true },
+  ],
+  drinkLiters: 3.28,
+  effective: { energyGoal: 1783, basal: 1748, maintenance: 2097, plannedDeficit: -315, activityEnergy: 0, energyGoalWithActivities: 1783 },
+  ...over,
+});
+
+test('get_goals presents the goals in the unit of the account, with the figure in use and the warnings', async () => {
+  const tools = register({ getGoals: async () => goals() });
+  assert.equal(tools.get('get_goals')!.config.annotations?.['readOnlyHint'], true);
+  const out = await parse(tools.get('get_goals')!.handler({}));
+  assert.equal(out.goal, 'lose');
+  assert.equal(out.activity_level_label, 'sedentary');
+  assert.deepEqual(out.energy_goal, { site_calculation: 1783, own: null, in_use: 1783 });
+  assert.deepEqual(out.basal_metabolism, { site_calculation: 1748, own: null, in_use: 1748 });
+  assert.deepEqual({ ...out.in_use_today, note: undefined }, {  note: undefined, energy_goal: 1783, basal_metabolism: 1748, maintenance_intake: 2097, planned_deficit: -315, planned_deficit_percent: 15, todays_activity_energy: 0, energy_goal_including_todays_activities: 1783 });
+  assert.equal(out.macro_goals_add_up_to, 1723);
+  assert.equal(out.nutrient_goals[0].own_g, 144);
+  assert.equal(out.warnings.length, 1);
+
+  // An own energy goal switches the deficit model off; the site then has no maintenance figure.
+  const own = register({ getGoals: async () => goals({ effective: { energyGoal: 1700, basal: 1748, maintenance: null, plannedDeficit: null, activityEnergy: 0, energyGoalWithActivities: 1700 } }) });
+  const o = await parse(own.get('get_goals')!.handler({}));
+  assert.equal(o.in_use_today.planned_deficit_percent, null);
+  assert.equal(o.energy_goal.in_use, 1700);
+  // Nothing read from today's balance: the form's own numbers are used.
+  const blind = register({ getGoals: async () => goals({ effective: null }) });
+  assert.equal((await parse(blind.get('get_goals')!.handler({}))).in_use_today, null);
+});
+
+test('update_goals maps its arguments, reports before and after, and flags what was not taken', async () => {
+  let received: unknown;
+  const tools = register({
+    updateGoals: async (change: unknown) => {
+      received = change;
+      return { before: goals(), after: goals({ targetEnergy: { computed: 1783, own: 1700 }, effective: { energyGoal: 1700, basal: 1748, maintenance: null, plannedDeficit: null, activityEnergy: 0, energyGoalWithActivities: 1700 } }), changed: ['ownTargetEnergy'], notApplied: [], warnings: [] };
+    },
+  });
+  assert.equal(tools.get('update_goals')!.config.annotations?.['readOnlyHint'], false);
+  assert.equal(tools.get('update_goals')!.config.annotations?.['destructiveHint'], true);
+  const out = await parse(
+    tools.get('update_goals')!.handler({ own_target_energy: 1700, activity_level: 1.375, nutrients: [{ code: 'carbohydrate', grams: 178 }] }),
+  );
+  assert.deepEqual(received, {
+    mode: undefined, targetWeightKg: undefined, activityLevel: 1.375, considerActivity: undefined, ownBasal: undefined, ownTargetEnergy: 1700,
+    drinkLiters: undefined, nutrients: [{ code: 'carbohydrate', grams: 178, percent: undefined, active: undefined }],
+  });
+  assert.equal(out.updated, true);
+  assert.equal(out.before.energy_goal.in_use, 1783);
+  assert.equal(out.after.energy_goal.in_use, 1700);
+  assert.equal(out.note, undefined);
+
+  const unread = register({ updateGoals: async () => ({ before: goals(), after: null, changed: ['mode'], notApplied: [], warnings: [] }) });
+  assert.match((await parse(unread.get('update_goals')!.handler({ mode: 'maintain' }))).note, /could not be read back/);
+
+  const ignored = register({ updateGoals: async () => ({ before: goals(), after: goals(), changed: ['mode'], notApplied: ['mode'], warnings: [] }) });
+  const r = await parse(ignored.get('update_goals')!.handler({ mode: 'maintain' }));
+  assert.deepEqual(r.not_applied, ['mode']);
+  assert.match(r.note, /not taken over/);
+});
+
+test('get_energy_model looks back the requested weeks from yesterday unless told otherwise', async () => {
+  let range: string[] = [];
+  const tools = register({
+    getEnergyModel: async (from: string, to: string) => {
+      range = [from, to];
+      return { confidence: 'low' } as never;
+    },
+  });
+  await parse(tools.get('get_energy_model')!.handler({ weeks: 2, to: '14.11.2026' }));
+  assert.deepEqual(range, ['01.11.2026', '14.11.2026']);
+  await parse(tools.get('get_energy_model')!.handler({}));
+  assert.equal(range[1], shiftDate(todayCzech(), -1));
+  assert.equal(range[0], shiftDate(todayCzech(), -28));
 });
