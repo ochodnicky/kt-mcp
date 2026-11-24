@@ -17,6 +17,7 @@ import { mcpAuthRouter, getOAuthProtectedResourceMetadataUrl } from '@modelconte
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js';
 import { loadConfig } from './config.js';
 import { KtClient } from './kt/client.js';
+import { registerPrompts } from './mcp/prompts.js';
 import { registerTools } from './mcp/tools.js';
 import { MCP_SCOPE, SingleUserOAuthProvider } from './auth/provider.js';
 
@@ -86,10 +87,14 @@ app.post('/mcp', requireAuth, async (req, res) => {
     {
       instructions:
         'Logs food into the user\'s kaloricketabulky.cz diary. The food database is Czech: search with Czech terms for the best matches. ' +
-        'When the user gives a count rather than a weight ("3 eggs"), call get_food_portions and log a natural portion unit instead of estimating grams.',
+        'When the user gives a count rather than a weight ("3 eggs"), call get_food_portions and log a natural portion unit instead of estimating grams. ' +
+        'When they say "my favourite ..." or "my usual ...", call list_favorite_foods first. ' +
+        'For questions about what they ate, use get_day_entries / get_diary_range / get_nutrient_ranking; for trends, get_balance_range and get_weight_history. ' +
+        'Tools that change the diary (log_*, update_*, delete_*, copy_*, add_*) write to their real diary: confirm first when anything is ambiguous, and never retry a write blindly.',
     },
   );
   registerTools(server, kt);
+  registerPrompts(server);
 
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
   res.on('close', () => {

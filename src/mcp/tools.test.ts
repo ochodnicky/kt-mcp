@@ -7,6 +7,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { KtAuthError, type DayOutcome, type DiaryDay, type KtClient, todayCzech } from '../kt/client.js';
+import { registerPrompts } from './prompts.js';
 import { registerTools } from './tools.js';
 
 type Handler = (args: Record<string, unknown>) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
@@ -37,6 +38,7 @@ const day = (date: string, entryCount: number): DiaryDay => ({
       id: '1',
       title: 'Snídaně',
       energyTotal: entryCount ? 130 : null,
+      notes: null,
       entries: entryCount
         ? [
             {
@@ -51,7 +53,7 @@ const day = (date: string, entryCount: number): DiaryDay => ({
           ]
         : [],
     },
-    { id: '2', title: 'Dopolední svačina', energyTotal: null, entries: [] },
+    { id: '2', title: 'Dopolední svačina', energyTotal: null, notes: null, entries: [] },
   ],
 });
 
@@ -95,8 +97,8 @@ test('day output carries entry ids, activities and notes, with the reading guide
   const tools = register({ getDayEntries: async () => day('10.11.2026', 1) });
   const out = await parse(tools.get('get_day_entries')!.handler({ date: '10.11.2026' }));
   assert.equal(out.meals[0].entries[0].entry_id, 'x');
-  assert.deepEqual(out.activities, [{ title: 'Test chůze', duration_minutes: 50, steps: 4000, energy: 216, energy_unit: 'kcal' }]);
-  assert.deepEqual(out.day_notes, [{ text: 'Test poznámka', created: '2026-11-10T10:00:00.000Z' }]);
+  assert.deepEqual(out.activities, [{ activity_id: 'act1', title: 'Test chůze', duration_minutes: 50, steps: 4000, energy: 216, energy_unit: 'kcal' }]);
+  assert.deepEqual(out.day_notes, [{ note_id: 'n1', text: 'Test poznámka', created: '2026-11-10T10:00:00.000Z' }]);
   assert.equal(typeof out.reading_guide, 'string');
 });
 
@@ -121,7 +123,7 @@ test('get_nutrient_ranking ranks over the range and reports failed days', async 
     },
   });
   const out = await parse(tools.get('get_nutrient_ranking')!.handler({ from: '09.11.2026', to: '10.11.2026', nutrient: 'protein' }));
-  assert.deepEqual(args, ['09.11.2026', '10.11.2026']);
+  assert.deepEqual(args, ['09.11.2026', '10.11.2026', 90]); // ranking may span up to 90 days
   assert.equal(out.ranking[0].title, 'Test skyr');
   assert.equal(out.ranking[0].total, 22);
   assert.equal(out.unit, 'g');
@@ -256,4 +258,223 @@ test('get_nutrient_ranking returns a null grand_total when nothing was known', a
   const out = await parse(tools.get('get_nutrient_ranking')!.handler({ from: '09.11.2026', to: '09.11.2026', nutrient: 'protein' }));
   assert.equal(out.grand_total, null);
   assert.deepEqual(out.ranking, []);
+});
+
+// ---------------------------------------------------------------------------
+// Recipes, balance, weight, favourites, activities, notes, copying, export
+// ---------------------------------------------------------------------------
+
+const NEW_TOOLS = [
+  'get_meal_details',
+  'get_day_balance',
+  'get_balance_range',
+  'get_weight_history',
+  'log_weight',
+  'list_favorite_foods',
+  'list_common_foods',
+  'add_favorite_food',
+  'remove_favorite_food',
+  'search_activity',
+  'log_activity',
+  'delete_activity',
+  'add_diary_note',
+  'delete_diary_note',
+  'copy_meal',
+  'copy_day',
+  'export_diary_csv',
+];
+
+test('every new tool is registered, with the right read-only / destructive hints', () => {
+  const tools = register({});
+  for (const name of NEW_TOOLS) assert.ok(tools.has(name), name);
+  const readOnly = ['get_meal_details', 'get_day_balance', 'get_balance_range', 'get_weight_history', 'list_favorite_foods', 'list_common_foods', 'search_activity', 'export_diary_csv'];
+  for (const name of readOnly) assert.equal(tools.get(name)?.config.annotations?.['readOnlyHint'], true, name);
+  const destructive = ['log_weight', 'delete_activity', 'delete_diary_note'];
+  for (const name of destructive) assert.equal(tools.get(name)?.config.annotations?.['destructiveHint'], true, name);
+  // Copies and adds are writes, but not destructive — and none of them is idempotent.
+  for (const name of ['copy_meal', 'copy_day', 'log_activity', 'add_diary_note']) {
+    assert.equal(tools.get(name)?.config.annotations?.['readOnlyHint'], false, name);
+    assert.equal(tools.get(name)?.config.annotations?.['idempotentHint'], false, name);
+  }
+});
+
+test('list_favorite_foods filters by name ignoring accents and case, and hints at search_food when nothing matches', async () => {
+  const tools = register({
+    listFavoriteFoods: async () => [
+      { id: 'f1', title: 'Kvasový chléb Authentic' },
+      { id: 'f2', title: 'Bio kefír' },
+    ],
+  });
+  const hit = await parse(tools.get('list_favorite_foods')!.handler({ query: 'KVASOVY chleb' }));
+  assert.deepEqual(hit.matches, [{ food_id: 'f1', title: 'Kvasový chléb Authentic' }]);
+  assert.equal(hit.total_favorites, 2);
+  const none = await parse(tools.get('list_favorite_foods')!.handler({ query: 'pizza' }));
+  assert.deepEqual(none.matches, []);
+  assert.match(none.hint, /search_food/);
+  const all = await parse(tools.get('list_favorite_foods')!.handler({}));
+  assert.equal(all.matches.length, 2);
+});
+
+test('get_day_balance and get_balance_range present the balance with averages and failed days', async () => {
+  const b = {
+    date: '10.11.2026',
+    energyUnit: 'kcal',
+    intake: 2000,
+    target: 2200,
+    output: 2600,
+    basal: 1750,
+    maintenance: 2600,
+    plannedDeficit: -400,
+    remaining: 200,
+    netBalance: -600,
+    activityEnergy: 300,
+    weight: 82,
+    nutrients: [{ code: 'protein', title: 'Bílkoviny', unit: 'g', goal: 150, actual: 120, percent: 80 }],
+  };
+  const tools = register({
+    getDayBalance: async () => b,
+    getBalanceRange: async () =>
+      [{ date: '10.11.2026', status: 'ok', balance: b }, { date: '11.11.2026', status: 'error', error: 'boom' }] as never,
+  });
+  const one = await parse(tools.get('get_day_balance')!.handler({ date: '10.11.2026' }));
+  assert.equal(one.net_balance, -600);
+  assert.equal(one.planned_deficit, -400);
+  assert.equal(one.nutrients[0].goal, 150);
+
+  const many = await parse(tools.get('get_balance_range')!.handler({ from: '10.11.2026', to: '11.11.2026' }));
+  assert.deepEqual(many.days, { ok: 1, error: 1, logged: 1 });
+  assert.deepEqual(many.failed_dates, ['11.11.2026']);
+  assert.equal(many.averages_over_logged_days.intake, 2000);
+  assert.equal(many.per_day[0].protein, 120);
+  assert.equal(many.per_day[1].status, 'error');
+});
+
+test('get_meal_details totals only the ingredients with known nutrition and counts the rest', async () => {
+  const nutrition = (protein: number | null) => ({ title: 'x', energy: 100, energyUnit: 'kcal', protein, carbs: 5, fat: 1, sugar: null, fibre: null, saturatedFat: null, salt: null });
+  const tools = register({
+    getMealDetails: async () => ({
+      id: 'm1',
+      title: 'Test bábovka',
+      ingredients: [
+        { title: 'mouka', amount: 250, unitTitle: '1 g', weight: 250, nutrition: nutrition(25), error: null },
+        { title: 'vejce', amount: 2, unitTitle: 'kus', weight: 100, nutrition: nutrition(null), error: null },
+        { title: 'záhada', amount: 1, unitTitle: null, weight: null, nutrition: null, error: 'nope' },
+      ],
+    }),
+  });
+  const out = await parse(tools.get('get_meal_details')!.handler({ meal_id: 'm1' }));
+  assert.equal(out.totals_for_whole_recipe.protein, 25); // the null protein is not added as 0
+  assert.equal(out.totals_for_whole_recipe.energy, 200);
+  assert.equal(out.unknown_ingredients, 1);
+  assert.equal(out.ingredients[2].error, 'nope');
+  assert.equal(out.ingredients[2].protein, null);
+});
+
+test('export_diary_csv returns metadata and the CSV as two text blocks', async () => {
+  const outcomes: DayOutcome[] = [
+    { date: '09.11.2026', status: 'filled', day: day('09.11.2026', 1) },
+    { date: '10.11.2026', status: 'error', error: 'boom' },
+  ];
+  let maxDays: unknown;
+  const tools = register({
+    getDiaryRange: async (_f: string, _t: string, m?: number) => {
+      maxDays = m;
+      return outcomes;
+    },
+  });
+  const result = await tools.get('export_diary_csv')!.handler({ from: '09.11.2026', to: '10.11.2026' });
+  assert.equal(maxDays, 31);
+  assert.equal(result.content.length, 2);
+  const meta = JSON.parse(result.content[0]?.text ?? '{}');
+  assert.equal(meta.rows, 1);
+  assert.deepEqual(meta.failed_dates, ['10.11.2026']);
+  assert.match(result.content[1]?.text ?? '', /^date,meal,title,kind,quantity/);
+  assert.match(result.content[1]?.text ?? '', /Test skyr/);
+});
+
+test('the diary-changing tools pass their arguments through and report what happened', async () => {
+  const calls: Record<string, unknown> = {};
+  const rec = (name: string, result: unknown) => async (a: unknown) => ((calls[name] = a), result);
+  const tools = register({
+    logWeight: rec('logWeight', { date: '10.11.2026', requested: 81.7, recorded: 81.7 }),
+    logActivity: rec('logActivity', { date: '10.11.2026', added: { id: 'a1', title: 'Chůze', durationMinutes: 30, steps: null, energy: 91.6, energyUnit: 'kcal' } }),
+    deleteActivity: rec('deleteActivity', { date: '10.11.2026', deleted: { id: 'a1', title: 'Chůze', durationMinutes: 30, steps: null, energy: 91.6, energyUnit: 'kcal' }, confirmed: true }),
+    addNote: rec('addNote', { date: '10.11.2026', added: { note: { id: 'n1', text: 'Test', created: null }, meal: 'Oběd' } }),
+    deleteNote: rec('deleteNote', { date: '10.11.2026', deleted: { note: { id: 'n1', text: 'Test', created: null }, meal: null }, confirmed: null }),
+    copyMeal: rec('copyMeal', { fromDate: '09.11.2026', toDate: '10.11.2026', fromMeal: 'Oběd', toMeal: 'Večeře', lines: 3, added: 3 }),
+    copyDay: rec('copyDay', { fromDate: '09.11.2026', toDate: '10.11.2026', copied: [{ fromMeal: 'Oběd', lines: 3, added: 3 }], failed: { meal: 'Večeře', error: 'boom' } }),
+    setFavoriteFood: async (id: string, fav: boolean) => ((calls[fav ? 'fav+' : 'fav-'] = id), { confirmed: true }),
+  } as unknown as Partial<KtClient>);
+  const h = (n: string) => tools.get(n)!.handler;
+
+  assert.equal((await parse(h('log_weight')({ weight_kg: 81.7, date: '10.11.2026' }))).recorded_kg, 81.7);
+  assert.deepEqual(calls['logWeight'], { weightKg: 81.7, date: '10.11.2026' });
+
+  const act = await parse(h('log_activity')({ activity_id: 'x', minutes: 30, date: '10.11.2026' }));
+  assert.equal(act.activity.activity_id, 'a1');
+  assert.deepEqual(calls['logActivity'], { activityId: 'x', minutes: 30, date: '10.11.2026' });
+
+  assert.equal((await parse(h('delete_activity')({ date: '10.11.2026', activity_id: 'a1' }))).confirmed_gone, true);
+
+  const added = await parse(h('add_diary_note')({ date: '10.11.2026', text: 'Test', meal: '3' }));
+  assert.deepEqual(added.note, { note_id: 'n1', text: 'Test', meal: 'Oběd' });
+  assert.deepEqual(calls['addNote'], { date: '10.11.2026', text: 'Test', meal: '3' });
+
+  const del = await parse(h('delete_diary_note')({ date: '10.11.2026', note_id: 'n1' }));
+  assert.equal(del.confirmed_gone, null);
+  assert.match(del.hint, /could not be confirmed/);
+
+  const cm = await parse(h('copy_meal')({ from_date: '09.11.2026', meal: '3', to_date: '10.11.2026', to_meal: '5' }));
+  assert.equal(cm.entries_added_to_target_day, 3);
+  assert.deepEqual(calls['copyMeal'], { fromDate: '09.11.2026', meal: '3', toDate: '10.11.2026', toMeal: '5' });
+
+  const cd = await parse(h('copy_day')({ from_date: '09.11.2026', to_date: '10.11.2026' }));
+  assert.equal(cd.completed, false);
+  assert.equal(cd.failed.meal, 'Večeře');
+
+  await parse(h('add_favorite_food')({ food_id: 'f9' }));
+  await parse(h('remove_favorite_food')({ food_id: 'f9' }));
+  assert.equal(calls['fav+'], 'f9');
+  assert.equal(calls['fav-'], 'f9');
+});
+
+test('a failing new write comes back as a tool error', async () => {
+  const tools = register({
+    copyMeal: async () => {
+      throw new Error('Nothing to copy');
+    },
+  } as unknown as Partial<KtClient>);
+  const r = await tools.get('copy_meal')!.handler({ from_date: '09.11.2026', meal: '2', to_date: '10.11.2026' });
+  assert.equal(r.isError, true);
+});
+
+// ---------------------------------------------------------------------------
+// Prompts
+// ---------------------------------------------------------------------------
+
+test('the prompts are registered and build sensible instructions', async () => {
+  const prompts = new Map<string, { config: { description?: string }; handler: (a: Record<string, string | undefined>) => { messages: Array<{ content: { text: string } }> } }>();
+  registerPrompts({
+    registerPrompt: (name: string, config: { description?: string }, handler: never) => {
+      prompts.set(name, { config, handler });
+    },
+  } as unknown as McpServer);
+  assert.deepEqual([...prompts.keys()].sort(), ['log_favorite', 'weekly_review']);
+
+  const review = prompts.get('weekly_review')!.handler({ from: '03.11.2026', to: '09.11.2026' }).messages[0]!.content.text;
+  assert.match(review, /03\.11\.2026–09\.11\.2026/);
+  assert.match(review, /get_balance_range/);
+  assert.match(review, /get_nutrient_ranking/);
+  assert.match(review, /do not count them as fasting/);
+
+  // With no dates the window is the 7 days ending today.
+  const defaults = prompts.get('weekly_review')!.handler({}).messages[0]!.content.text;
+  assert.match(defaults, new RegExp(todayCzech().replace(/\./g, '\\.')));
+
+  const fav = prompts.get('log_favorite')!.handler({ food: 'kvasový chléb', amount: '2 plátky' }).messages[0]!.content.text;
+  assert.match(fav, /list_favorite_foods with query "kvasový chléb"/);
+  assert.match(fav, /after I confirm/);
+  assert.match(fav, /2 plátky/);
+
+  assert.throws(() => prompts.get('weekly_review')!.handler({ from: '31.02.2026' }), /does not exist/);
 });

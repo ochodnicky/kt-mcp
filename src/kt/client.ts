@@ -136,13 +136,15 @@ export interface DiaryMeal {
   title: string;
   energyTotal: number | null;
   entries: DiaryEntry[];
+  /** Notes attached to this meal; null when the response had no readable list. */
+  notes: DiaryNote[] | null;
 }
 
 /** An exercise line (walk, workout, step count). Energy is what the site credits as burned. */
 export interface DiaryActivity {
   id: string;
   title: string;
-  /** Parsed from "155 min"; null when the site gives no duration (step-count lines). */
+  /** Parsed from "155 min" or "0,5 hod"; null when the site gives no duration (step-count lines). */
   durationMinutes: number | null;
   steps: number | null;
   energy: number | null;
@@ -193,12 +195,151 @@ export function assertEntryId(id: string): string {
   return id;
 }
 
+export interface NutrientProgress {
+  code: string | null;
+  title: string;
+  unit: string | null;
+  goal: number | null;
+  actual: number | null;
+  percent: number | null;
+}
+
+/** The site's own balance for one day (`/user/diary/summary/{date}`): intake against goals, and energy spent. */
+export interface DayBalance {
+  date: string;
+  energyUnit: string;
+  /** Energy eaten that day. 0 on a day with nothing logged — the site cannot tell "ate nothing" from "logged nothing". */
+  intake: number | null;
+  /** The day's intake goal. */
+  target: number | null;
+  /** Energy spent: basal metabolism + flat activity allowance + logged activities. */
+  output: number | null;
+  basal: number | null;
+  /** The intake that would hold weight steady. */
+  maintenance: number | null;
+  /** The site's "Kalorický deficit": the goal minus maintenance. It is the PLANNED deficit, not what the day actually came to. */
+  plannedDeficit: number | null;
+  /** The part of the goal still unused. */
+  remaining: number | null;
+  /** intake − output, computed here; negative means a deficit. null when either is unknown. */
+  netBalance: number | null;
+  /** Energy credited from logged activities. */
+  activityEnergy: number | null;
+  weight: number | null;
+  /** Goal vs. actual for protein, carbohydrate, fat, fibre, sugar, salt and so on, each with the site's own unit. */
+  nutrients: NutrientProgress[];
+}
+
+export type BalanceOutcome =
+  | { date: string; status: 'ok'; balance: DayBalance }
+  | { date: string; status: 'error'; error: string };
+
+export interface WeightRecord {
+  date: string;
+  value: number;
+}
+
+export interface WeightHistory {
+  unit: string;
+  /** The most recent weight the site shows for the requested day. */
+  current: number | null;
+  target: number | null;
+  /** The records the site lists for the month around the requested day, oldest first. */
+  records: WeightRecord[];
+}
+
+export interface FoodRef {
+  id: string;
+  title: string;
+}
+
+export interface ActivityHit {
+  id: string;
+  title: string;
+}
+
+export interface ActivityLogged {
+  date: string;
+  /** The new activity line; null when it could not be identified afterwards. */
+  added: DiaryActivity | null;
+}
+
+export interface ActivityDeletion {
+  date: string;
+  deleted: DiaryActivity;
+  confirmed: boolean | null;
+}
+
+export interface NoteWithMeal {
+  note: DiaryNote;
+  /** Title of the meal the note belongs to; null for a note on the whole day. */
+  meal: string | null;
+}
+
+export interface NoteAdded {
+  date: string;
+  added: NoteWithMeal | null;
+}
+
+export interface NoteDeletion {
+  date: string;
+  deleted: NoteWithMeal;
+  confirmed: boolean | null;
+}
+
+export interface WeightLogged {
+  date: string;
+  requested: number;
+  /** What the site lists for that date afterwards; null when it could not be read back. */
+  recorded: number | null;
+}
+
+export interface MealCopy {
+  fromDate: string;
+  toDate: string;
+  fromMeal: string;
+  toMeal: string;
+  /** Lines the site was asked to copy. */
+  lines: number;
+  /** How many entries the target day gained; null when it could not be read back. */
+  added: number | null;
+}
+
+export interface DayCopy {
+  fromDate: string;
+  toDate: string;
+  copied: MealCopy[];
+  /** Set when a meal failed; meals before it were already copied. */
+  failed: { meal: string; error: string } | null;
+}
+
+export interface MealIngredient {
+  title: string;
+  amount: number | null;
+  unitTitle: string | null;
+  /** Weight in g (ml for liquids) of this ingredient in the whole recipe, when the site states it. */
+  weight: number | null;
+  nutrition: Nutrition | null;
+  /** Why nutrition is missing. */
+  error: string | null;
+}
+
+export interface MealDetails {
+  id: string;
+  title: string;
+  ingredients: MealIngredient[];
+}
+
 export type DayOutcome =
   | { date: string; status: 'filled' | 'empty'; day: DiaryDay }
   | { date: string; status: 'error'; error: string };
 
-/** Hard cap for get_diary_range, inclusive of both end days. */
+/** Hard cap for the tools that return every entry (get_diary_range), inclusive of both end days. */
 export const MAX_RANGE_DAYS = 14;
+/** Cap for tools that return only aggregates (ranking, balance series) — the output stays small however long the range. */
+export const MAX_LONG_RANGE_DAYS = 90;
+/** Cap for the CSV export, which does return every entry. */
+export const MAX_EXPORT_DAYS = 31;
 
 /**
  * A food's base unit — the one whose multiplier is 1 (the site sends `null`
@@ -414,11 +555,13 @@ function parseActivities(raw: unknown, dayEnergyUnit: string): DiaryActivity[] |
   const out: DiaryActivity[] = [];
   for (const a of raw as unknown[]) {
     if (!isRecord(a) || typeof a['title'] !== 'string') return null;
-    const minutes = typeof a['unit'] === 'string' ? /^(\d[\d ]*(?:,\d+)?) min$/.exec(a['unit'].replace(/[  ]/g, ' ').trim()) : null;
+    const unitText = typeof a['unit'] === 'string' ? a['unit'].replace(/[\u00a0\u202f]/g, ' ').trim() : '';
+    const duration = /^(\d[\d ]*(?:,\d+)?) (min|hod)$/.exec(unitText);
+    const amount = duration ? parseCzechNumber(duration[1]) : null;
     out.push({
       id: String(a['id'] ?? ''),
       title: a['title'],
-      durationMinutes: minutes ? parseCzechNumber(minutes[1]) : null,
+      durationMinutes: amount === null ? null : Math.round(duration?.[2] === 'hod' ? amount * 60 : amount),
       steps: parseCzechNumber(a['steps']),
       energy: parseCzechNumber(a['energy']),
       energyUnit: typeof a['energyUnit'] === 'string' ? a['energyUnit'] : dayEnergyUnit,
@@ -474,6 +617,7 @@ export function parseDiaryDay(data: unknown, requestedDate: string): DiaryDay {
       id: String(slot['id'] ?? i),
       title: slot['title'],
       energyTotal: parseCzechNumber(slot['energyTotal']),
+      notes: parseNotes(slot['notes']),
       entries: slot['foodstuff'].map((raw: unknown) => parseDiaryEntry(raw, energyUnit, `${where} / ${String(slot['title'])}`)),
     };
   });
@@ -493,6 +637,94 @@ export function parseDiaryDay(data: unknown, requestedDate: string): DiaryDay {
   };
 }
 
+/** Reads `/user/diary/summary/{date}/get`. Throws on a shape it does not recognise rather than guessing. */
+export function parseDayBalance(data: unknown, date: string): DayBalance {
+  const where = `balance ${date}`;
+  if (!isRecord(data)) throw new KtError(`${where}: expected an object`);
+  const balance = data['balance'];
+  if (!isRecord(balance)) throw new KtError(`${where}: response has no balance block`);
+  if (!Array.isArray(data['items'])) throw new KtError(`${where}: response has no item list`);
+
+  const num = (v: unknown) => parseCzechNumber(v);
+  const energyItem = (data['items'] as unknown[]).find(i => isRecord(i) && i['code'] === 'total');
+  const energyUnit = isRecord(energyItem) && typeof energyItem['unit'] === 'string' ? energyItem['unit'] : 'kcal';
+
+  const nutrients: NutrientProgress[] = [];
+  const groups = Array.isArray(data['itemsDynamic']) ? (data['itemsDynamic'] as unknown[]) : [];
+  for (const group of groups) {
+    if (!Array.isArray(group)) throw new KtError(`${where}: nutrient group is not a list`);
+    for (const item of group as unknown[]) {
+      if (!isRecord(item) || typeof item['title'] !== 'string') throw new KtError(`${where}: unreadable nutrient entry`);
+      nutrients.push({
+        code: typeof item['code'] === 'string' ? item['code'] : null,
+        title: item['title'],
+        unit: typeof item['unit'] === 'string' ? item['unit'] : null,
+        goal: num(item['goal']),
+        actual: num(item['actual']),
+        percent: num(item['percent']),
+      });
+    }
+  }
+
+  const intake = num(balance['intake']);
+  const output = num(balance['output'] ?? balance['energyOutputTotal']);
+  return {
+    date,
+    energyUnit,
+    intake,
+    target: num(balance['target']),
+    output,
+    basal: num(balance['basal']),
+    maintenance: num(balance['energyIntakeMaintenance']),
+    plannedDeficit: num(balance['energyDeficit']),
+    remaining: num(balance['intakeRest']),
+    netBalance: intake !== null && output !== null ? Math.round((intake - output) * 10) / 10 : null,
+    activityEnergy: num(data['activityEnergyTotal']),
+    weight: num(data['weight']),
+    nutrients,
+  };
+}
+
+/** Reads the weight block of `/statistic/summary/{date}/get`. */
+export function parseWeightHistory(data: unknown): WeightHistory {
+  if (!isRecord(data)) throw new KtError('weight history: expected an object');
+  const list = data['monthWeight'];
+  if (!Array.isArray(list)) throw new KtError('weight history: response has no weight list');
+  const records: WeightRecord[] = [];
+  for (const r of list as unknown[]) {
+    if (!isRecord(r) || typeof r['from'] !== 'number' || Number.isNaN(new Date(r['from']).getTime())) {
+      throw new KtError('weight history: unreadable weight record');
+    }
+    const value = parseCzechNumber(r['valueString'] ?? r['value']);
+    if (value === null) throw new KtError('weight history: weight record without a value');
+    records.push({ date: pragueDate(new Date(r['from'])), value });
+  }
+  return {
+    unit: typeof data['weightUnit'] === 'string' ? data['weightUnit'] : 'kg',
+    current: parseCzechNumber(data['weight']),
+    target: parseCzechNumber(data['weightTarget']),
+    records,
+  };
+}
+
+function parseFoodRefs(data: unknown, where: string): FoodRef[] {
+  if (!Array.isArray(data)) throw new KtError(`${where}: expected a list`);
+  return (data as unknown[]).map(row => {
+    if (!isRecord(row) || typeof row['id'] !== 'string' || typeof row['title'] !== 'string') {
+      throw new KtError(`${where}: unreadable food entry`);
+    }
+    return { id: row['id'], title: row['title'] };
+  });
+}
+
+/** Every note on a day, whole-day and per-meal, with the meal it belongs to. */
+function collectNotes(day: DiaryDay): NoteWithMeal[] {
+  return [
+    ...(day.notes ?? []).map(note => ({ note, meal: null })),
+    ...day.meals.flatMap(m => (m.notes ?? []).map(note => ({ note, meal: m.title }))),
+  ];
+}
+
 export interface KtCredentials {
   email: string;
   password: string;
@@ -501,6 +733,25 @@ export interface KtCredentials {
 export class KtClient {
   private cookie: string | null = null;
   private loginInFlight: Promise<void> | null = null;
+
+  // Days that are over rarely change, so reads of them are kept for a few
+  // minutes. Today (and anything later) is never cached, every write made
+  // through this client clears the lot, and the reads that verify a write
+  // bypass it, so a stale answer can never pass for confirmation.
+  private static readonly CACHE_TTL_MS = 5 * 60_000;
+  private readonly dayCache = new Map<string, { at: number; day: DiaryDay }>();
+  private readonly balanceCache = new Map<string, { at: number; balance: DayBalance }>();
+
+  private invalidate(): void {
+    this.dayCache.clear();
+    this.balanceCache.clear();
+  }
+
+  private isPastDay(date: string): boolean {
+    const d = utcDayOf(date);
+    const today = utcDayOf(todayCzech());
+    return d !== null && today !== null && d < today;
+  }
 
   constructor(private readonly credentials: KtCredentials) {}
 
@@ -712,7 +963,11 @@ export class KtClient {
     payload['diaryTimeGuid'] = args.meal;
     payload['date'] = date;
 
-    await this.authed('/user/foodstuff/add?format=json&=', { method: 'POST', body: payload });
+    try {
+      await this.authed('/user/foodstuff/add?format=json&=', { method: 'POST', body: payload });
+    } finally {
+      this.invalidate();
+    }
   }
 
   /** Raw daily summary. Shape is not fully documented, so it is passed through. */
@@ -726,10 +981,17 @@ export class KtClient {
    * unlike the summary — lists every logged line with its quantity and
    * nutrients. Omit the date for today.
    */
-  async getDayEntries(date?: string): Promise<DiaryDay> {
+  async getDayEntries(date?: string, opts: { fresh?: boolean } = {}): Promise<DiaryDay> {
     const day = date === undefined ? todayCzech() : assertCalendarDate(date);
+    const cacheable = this.isPastDay(day);
+    if (cacheable && !opts.fresh) {
+      const hit = this.dayCache.get(day);
+      if (hit && Date.now() - hit.at < KtClient.CACHE_TTL_MS) return hit.day;
+    }
     const data = await this.authed(`/user/diary/${day}/get?format=json`);
-    return parseDiaryDay(data, day);
+    const parsed = parseDiaryDay(data, day);
+    if (cacheable) this.dayCache.set(day, { at: Date.now(), day: parsed });
+    return parsed;
   }
 
   /**
@@ -738,9 +1000,9 @@ export class KtClient {
    * on; a login failure aborts the whole range, since every remaining day
    * would only repeat it.
    */
-  async getDiaryRange(from: string, to: string): Promise<DayOutcome[]> {
+  async getDiaryRange(from: string, to: string, maxDays = MAX_RANGE_DAYS): Promise<DayOutcome[]> {
     const outcomes: DayOutcome[] = [];
-    for (const date of enumerateDays(from, to)) {
+    for (const date of enumerateDays(from, to, maxDays)) {
       try {
         const day = await this.getDayEntries(date);
         outcomes.push({ date, status: day.entryCount === 0 ? 'empty' : 'filled', day });
@@ -758,7 +1020,7 @@ export class KtClient {
 
   /** Finds one line on a day by its diary-line id. Throws when it is not there, so nothing is ever changed blind. */
   private async findEntry(date: string, entryId: string): Promise<{ meal: DiaryMeal; entry: DiaryEntry }> {
-    const day = await this.getDayEntries(date);
+    const day = await this.getDayEntries(date, { fresh: true });
     for (const meal of day.meals) {
       const entry = meal.entries.find(e => e.id === entryId);
       if (entry) return { meal, entry };
@@ -785,12 +1047,14 @@ export class KtClient {
       // The reply could not be read, but the delete may still have gone through.
       // Report failure only if the line is demonstrably still there; otherwise
       // the caller would retry and be told "no such entry".
-      const gone = await this.getDayEntries(date).then(isGone, () => false);
+      const gone = await this.getDayEntries(date, { fresh: true }).then(isGone, () => false);
       if (!gone) throw error;
+    } finally {
+      this.invalidate();
     }
 
     // The delete has landed; a failed read-back must not become an error, or a retry would hit "no such entry".
-    const confirmed = await this.getDayEntries(date).then(isGone, () => null);
+    const confirmed = await this.getDayEntries(date, { fresh: true }).then(isGone, () => null);
     return { date, meal: meal.title, deleted: entry, confirmed };
   }
 
@@ -823,10 +1087,14 @@ export class KtClient {
       );
     }
 
-    await this.authed('/user/diary/foodstuff/unit/edit?format=json&=', {
-      method: 'POST',
-      body: { ...form, multiplier: args.amount, unitGuid: unitId },
-    });
+    try {
+      await this.authed('/user/diary/foodstuff/unit/edit?format=json&=', {
+        method: 'POST',
+        body: { ...form, multiplier: args.amount, unitGuid: unitId },
+      });
+    } finally {
+      this.invalidate();
+    }
 
     // As with delete: the write has landed, so the read-back is best-effort.
     const after = await this.findEntry(date, id).then(
@@ -834,6 +1102,321 @@ export class KtClient {
       () => null,
     );
     return { date, meal: meal.title, before: entry, after };
+  }
+
+  // ---------------------------------------------------------------------
+  // Balance, weight, favourites
+  // ---------------------------------------------------------------------
+
+  /**
+   * The site's own balance for one day: intake against goals, energy spent and
+   * nutrient goals vs. actuals. Past days are cached briefly.
+   */
+  async getDayBalance(date?: string): Promise<DayBalance> {
+    const day = date === undefined ? todayCzech() : assertCalendarDate(date);
+    const cacheable = this.isPastDay(day);
+    if (cacheable) {
+      const hit = this.balanceCache.get(day);
+      if (hit && Date.now() - hit.at < KtClient.CACHE_TTL_MS) return hit.balance;
+    }
+    const data = await this.authed(`/user/diary/summary/${day}/get?format=json`);
+    const balance = parseDayBalance(data, day);
+    if (cacheable) this.balanceCache.set(day, { at: Date.now(), balance });
+    return balance;
+  }
+
+  /** getDayBalance for every day in a range, one at a time; a day that fails is reported, a login failure aborts. */
+  async getBalanceRange(from: string, to: string, maxDays = MAX_LONG_RANGE_DAYS): Promise<BalanceOutcome[]> {
+    const outcomes: BalanceOutcome[] = [];
+    for (const date of enumerateDays(from, to, maxDays)) {
+      try {
+        outcomes.push({ date, status: 'ok', balance: await this.getDayBalance(date) });
+      } catch (error) {
+        if (error instanceof KtAuthError) throw error;
+        outcomes.push({ date, status: 'error', error: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    return outcomes;
+  }
+
+  /** Weight records the site lists for the month around a day, plus the current weight and target. */
+  async getWeightHistory(date?: string): Promise<WeightHistory> {
+    return parseWeightHistory(await this.getDaySummary(date));
+  }
+
+  /**
+   * Records a body weight. The site keeps one record per date, so writing a
+   * date that already has one replaces it.
+   */
+  async logWeight(args: { weightKg: number; date?: string }): Promise<WeightLogged> {
+    const date = args.date === undefined ? todayCzech() : assertCalendarDate(args.date);
+    if (!Number.isFinite(args.weightKg) || args.weightKg < 20 || args.weightKg > 500) {
+      throw new KtError('weight must be a number between 20 and 500 kg');
+    }
+    try {
+      await this.authed('/user/weight/add?format=json&=', { method: 'POST', body: { weight: args.weightKg, date } });
+    } finally {
+      this.invalidate();
+    }
+    const recorded = await this.getWeightHistory(date).then(
+      h => h.records.find(r => r.date === date)?.value ?? null,
+      () => null,
+    );
+    return { date, requested: args.weightKg, recorded };
+  }
+
+  /** The user's favourite foods. The ids are the same ones search_food returns, so they work with log_food. */
+  async listFavoriteFoods(): Promise<FoodRef[]> {
+    return parseFoodRefs(await this.authed('/user/settings/favorite/foodstuff?format=json'), 'favourite foods');
+  }
+
+  /** The foods the user logs most often. */
+  async listCommonFoods(): Promise<FoodRef[]> {
+    return parseFoodRefs(await this.authed('/user/settings/common/foodstuff?format=json'), 'common foods');
+  }
+
+  /** Adds or removes a food from the favourites and re-reads the list to confirm. */
+  async setFavoriteFood(foodId: string, favorite: boolean): Promise<{ confirmed: boolean | null }> {
+    const id = assertEntryId(foodId);
+    await this.authed(`/user/settings/favorite/foodstuff/${favorite ? 'add' : 'remove'}/${id}?format=json`);
+    const confirmed = await this.listFavoriteFoods().then(
+      list => list.some(f => f.id === id) === favorite,
+      () => null,
+    );
+    return { confirmed };
+  }
+
+  // ---------------------------------------------------------------------
+  // Activities and notes
+  // ---------------------------------------------------------------------
+
+  /** Searches the site's activity catalogue (walking, cycling, ...). */
+  async searchActivities(query: string, limit = 10): Promise<ActivityHit[]> {
+    const { text } = await this.request(`/autocomplete/foodstuff-activity-meal?format=json&query=${encodeURIComponent(query)}`);
+    const data = this.parseEnvelope(text, 'activity search');
+    if (!Array.isArray(data)) throw new KtError('activity search: expected an array of results');
+    return (data as unknown[])
+      .filter((row): row is Record<string, unknown> => isRecord(row) && row['clazz'] === 'activity')
+      .slice(0, limit)
+      .map(row => ({ id: String(row['id']), title: String(row['title']) }));
+  }
+
+  /**
+   * Logs an activity for a given number of minutes. Only activities the site
+   * measures in hours are supported (walking, cycling and the like); the site
+   * form's own unit is checked, so a minutes figure is never read as something else.
+   */
+  async logActivity(args: { activityId: string; minutes: number; date?: string }): Promise<ActivityLogged> {
+    const date = args.date === undefined ? todayCzech() : assertCalendarDate(args.date);
+    const id = assertEntryId(args.activityId);
+    if (!Number.isFinite(args.minutes) || args.minutes <= 0 || args.minutes > 24 * 60) {
+      throw new KtError('minutes must be between 1 and 1440');
+    }
+    const form = await this.authed(`/user/activity/add/form/${id}?format=json`);
+    if (!isRecord(form) || typeof form['guid'] !== 'string') throw new KtError(`log activity: unknown activity id ${id}`);
+    if (form['timeUnit'] !== 'hrs') {
+      throw new KtError(`log activity: "${String(form['title'])}" is measured in "${String(form['timeUnit'])}", which this tool does not support`);
+    }
+
+    const before = new Set((await this.getDayEntries(date, { fresh: true })).activities?.map(a => a.id) ?? []);
+    try {
+      await this.authed('/user/activity/add?format=json&=', {
+        method: 'POST',
+        body: { ...form, date, time: Math.round((args.minutes / 60) * 10_000) / 10_000 },
+      });
+    } finally {
+      this.invalidate();
+    }
+    const added = await this.getDayEntries(date, { fresh: true }).then(
+      day => (day.activities ?? []).filter(a => !before.has(a.id)),
+      () => [] as DiaryActivity[],
+    );
+    return { date, added: added.length === 1 ? (added[0] ?? null) : null };
+  }
+
+  /** Deletes one activity line from a day, after checking it is on that day. Synced activities (watch, phone) may be re-imported. */
+  async deleteActivity(args: { date: string; activityId: string }): Promise<ActivityDeletion> {
+    const date = assertCalendarDate(args.date);
+    const id = assertEntryId(args.activityId);
+    const day = await this.getDayEntries(date, { fresh: true });
+    const activity = day.activities?.find(a => a.id === id);
+    if (!activity) throw new KtError(`No activity with id ${id} on ${date}. Ids come from get_day_entries.`);
+
+    const isGone = (d: DiaryDay) => !(d.activities ?? []).some(a => a.id === id);
+    try {
+      await this.authed(`/user/diary/activity/delete/${id}?format=json`);
+    } catch (error) {
+      if (error instanceof KtAuthError) throw error;
+      const gone = await this.getDayEntries(date, { fresh: true }).then(isGone, () => false);
+      if (!gone) throw error;
+    } finally {
+      this.invalidate();
+    }
+    const confirmed = await this.getDayEntries(date, { fresh: true }).then(isGone, () => null);
+    return { date, deleted: activity, confirmed };
+  }
+
+  /** Adds a free-text note to a day, or to one of its meals. */
+  async addNote(args: { date: string; text: string; meal?: MealId }): Promise<NoteAdded> {
+    const date = assertCalendarDate(args.date);
+    const text = args.text.trim();
+    if (text === '' || text.length > 1000) throw new KtError('a note needs 1 to 1000 characters');
+
+    const before = new Set(collectNotes(await this.getDayEntries(date, { fresh: true })).map(n => n.note.id));
+    try {
+      await this.authed('/user/diary/note/add?format=json&=', {
+        method: 'POST',
+        body: { date, note: text, time: args.meal === undefined ? 0 : Number(args.meal) },
+      });
+    } finally {
+      this.invalidate();
+    }
+    const added = await this.getDayEntries(date, { fresh: true }).then(
+      day => collectNotes(day).filter(n => !before.has(n.note.id)),
+      () => [] as NoteWithMeal[],
+    );
+    return { date, added: added.length === 1 ? (added[0] ?? null) : null };
+  }
+
+  /** Deletes one note (whole-day or per-meal) after checking it is on that day. */
+  async deleteNote(args: { date: string; noteId: string }): Promise<NoteDeletion> {
+    const date = assertCalendarDate(args.date);
+    const id = assertEntryId(args.noteId);
+    const found = collectNotes(await this.getDayEntries(date, { fresh: true })).find(n => n.note.id === id);
+    if (!found) throw new KtError(`No note with id ${id} on ${date}. Ids come from get_day_entries.`);
+
+    const isGone = (d: DiaryDay) => !collectNotes(d).some(n => n.note.id === id);
+    try {
+      await this.authed(`/user/diary/note/delete/${id}?format=json`);
+    } catch (error) {
+      if (error instanceof KtAuthError) throw error;
+      const gone = await this.getDayEntries(date, { fresh: true }).then(isGone, () => false);
+      if (!gone) throw error;
+    } finally {
+      this.invalidate();
+    }
+    const confirmed = await this.getDayEntries(date, { fresh: true }).then(isGone, () => null);
+    return { date, deleted: found, confirmed };
+  }
+
+  // ---------------------------------------------------------------------
+  // Copying
+  // ---------------------------------------------------------------------
+
+  /**
+   * Copies every line of one meal onto another day (and optionally another
+   * meal), with the quantities as they were. Works as the site's own "copy
+   * meal" dialog does: fetch its form, set the target date and meal, post it back.
+   */
+  async copyMeal(args: { fromDate: string; meal: MealId; toDate: string; toMeal?: MealId }): Promise<MealCopy> {
+    const fromDate = assertCalendarDate(args.fromDate);
+    const toDate = assertCalendarDate(args.toDate);
+    const toMeal = args.toMeal ?? args.meal;
+    if (fromDate === toDate && args.meal === toMeal) {
+      throw new KtError('Source and target are the same meal on the same day — that would just duplicate every line');
+    }
+
+    const form = await this.authed(`/user/diary-time/create/form/${fromDate}/${args.meal}?format=json`);
+    if (!isRecord(form) || !Array.isArray(form['foodstuff'])) {
+      throw new KtError(`copy meal: the site returned no copy form for ${MEALS[args.meal]} on ${fromDate}`);
+    }
+    const lines = (form['foodstuff'] as unknown[]).filter(l => isRecord(l) && l['selected'] !== false).length;
+    if (lines === 0) throw new KtError(`Nothing to copy: ${MEALS[args.meal]} on ${fromDate} has no entries`);
+
+    const countBefore = await this.getDayEntries(toDate, { fresh: true }).then(d => d.entryCount, () => null);
+    try {
+      await this.authed('/user/diary-time/copy?format=json&=', {
+        method: 'POST',
+        body: { ...form, date: toDate, diaryTimeGuid: toMeal },
+      });
+    } finally {
+      this.invalidate();
+    }
+    const countAfter = await this.getDayEntries(toDate, { fresh: true }).then(d => d.entryCount, () => null);
+    return {
+      fromDate,
+      toDate,
+      fromMeal: MEALS[args.meal],
+      toMeal: MEALS[toMeal],
+      lines,
+      added: countBefore !== null && countAfter !== null ? countAfter - countBefore : null,
+    };
+  }
+
+  /**
+   * Copies every meal of one day onto another, meal by meal into the same
+   * meal slots. Activities and notes are not copied. A failure stops the
+   * copy and says which meals were already done.
+   */
+  async copyDay(args: { fromDate: string; toDate: string }): Promise<DayCopy> {
+    const fromDate = assertCalendarDate(args.fromDate);
+    const toDate = assertCalendarDate(args.toDate);
+    if (fromDate === toDate) throw new KtError('Source and target are the same day — that would just duplicate every entry');
+
+    const source = await this.getDayEntries(fromDate, { fresh: true });
+    const slots = source.meals.filter(m => m.entries.length > 0);
+    if (slots.length === 0) throw new KtError(`Nothing to copy: ${fromDate} has no entries`);
+
+    const copied: MealCopy[] = [];
+    for (const slot of slots) {
+      const meal = slot.id as MealId;
+      if (!(meal in MEALS)) {
+        return { fromDate, toDate, copied, failed: { meal: slot.title, error: `unknown meal id ${slot.id}` } };
+      }
+      try {
+        copied.push(await this.copyMeal({ fromDate, meal, toDate }));
+      } catch (error) {
+        if (error instanceof KtAuthError) throw error;
+        return { fromDate, toDate, copied, failed: { meal: slot.title, error: error instanceof Error ? error.message : String(error) } };
+      }
+    }
+    return { fromDate, toDate, copied, failed: null };
+  }
+
+  // ---------------------------------------------------------------------
+  // Saved recipes in detail
+  // ---------------------------------------------------------------------
+
+  /**
+   * A saved recipe's ingredients, each with its nutrition for the amount the
+   * recipe uses (the whole recipe, not one portion). A diary line logged from
+   * a recipe shows only the recipe's name, so this is how to see inside one.
+   */
+  async getMealDetails(mealId: string): Promise<MealDetails> {
+    const id = assertEntryId(mealId);
+    const form = await this.authed(`/user/meal/add/form/${id}?format=json`);
+    if (!isRecord(form) || typeof form['guid'] !== 'string' || !Array.isArray(form['foodstuff'])) {
+      throw new KtError(`meal details: unknown recipe id ${id}`);
+    }
+    const ingredients: MealIngredient[] = [];
+    for (const raw of form['foodstuff'] as unknown[]) {
+      if (!isRecord(raw) || typeof raw['title'] !== 'string') throw new KtError('meal details: unreadable ingredient');
+      const amount = parseCzechNumber(raw['count']);
+      const unitId = typeof raw['selectedUnitGuid'] === 'string' ? raw['selectedUnitGuid'] : null;
+      const unit = (Array.isArray(raw['units']) ? (raw['units'] as unknown[]) : []).find(u => isRecord(u) && u['id'] === unitId);
+      const foodId = typeof raw['foodstuffGuid'] === 'string' ? raw['foodstuffGuid'] : null;
+
+      let nutrition: Nutrition | null = null;
+      let error: string | null = null;
+      if (foodId && unitId && amount !== null && amount > 0) {
+        try {
+          nutrition = await this.getNutrition(foodId, amount, unitId);
+        } catch (e) {
+          error = e instanceof Error ? e.message : String(e);
+        }
+      } else {
+        error = 'the site gives no amount or unit for this ingredient';
+      }
+      ingredients.push({
+        title: raw['title'],
+        amount,
+        unitTitle: isRecord(unit) && typeof unit['title'] === 'string' ? unit['title'] : null,
+        weight: parseCzechNumber(raw['weight']),
+        nutrition,
+        error,
+      });
+    }
+    return { id, title: String(form['title'] ?? ''), ingredients };
   }
 
   // ---------------------------------------------------------------------
@@ -949,7 +1532,11 @@ export class KtClient {
     payload['selectedUnitGuid'] = PORTION_UNIT;
     payload['count'] = 1;
 
-    await this.authed('/user/meal/add?format=json&=', { method: 'POST', body: payload });
+    try {
+      await this.authed('/user/meal/add?format=json&=', { method: 'POST', body: payload });
+    } finally {
+      this.invalidate();
+    }
   }
 
   /** Permanently deletes a saved recipe. */

@@ -29,7 +29,7 @@ function filled(date: string, ...entries: DiaryEntry[]): DayOutcome {
       entryCount: entries.length,
       activities: null,
       notes: null,
-      meals: [{ id: '1', title: 'Snídaně', energyTotal: null, entries }],
+      meals: [{ id: '1', title: 'Snídaně', energyTotal: null, notes: null, entries }],
     },
   };
 }

@@ -9,15 +9,22 @@
 import { z } from 'zod';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
+  type DayBalance,
+  type DiaryActivity,
   type DiaryDay,
   type DiaryEntry,
   GRAM_UNIT,
   KtClient,
+  MAX_EXPORT_DAYS,
+  MAX_LONG_RANGE_DAYS,
   MAX_RANGE_DAYS,
   MEALS,
   type MealId,
+  type Nutrition,
   todayCzech,
 } from '../kt/client.js';
+import { summarizeBalances } from '../kt/balance.js';
+import { entriesToCsv } from '../kt/export.js';
 import { RANKABLE_NUTRIENTS, rankNutrient } from '../kt/ranking.js';
 
 const MEAL_IDS = Object.keys(MEALS) as [MealId, ...MealId[]];
@@ -292,8 +299,8 @@ export function registerTools(server: McpServer, kt: KtClient): void {
         'Read every food and recipe actually logged on one day, grouped by meal, each with its name, the logged quantity and its nutrients. Read-only. ' +
         'Use this instead of get_day_summary whenever the question is about WHICH foods were eaten ("what gave me the most protein", "what did I have for dinner"); get_day_summary only has totals and goals. ' +
         'Nutrient values are for the logged quantity, not per 100 g. A null value means the site has no figure for it — it is not zero. ' +
-        'Each entry has an entry_id, which update_diary_entry and delete_diary_entry need. The day\'s exercise (activities) and free-text notes (day_notes) come along too. ' +
-        'Empty meals are left out. For several days use get_diary_range.',
+        'Each entry has an entry_id (for update_diary_entry / delete_diary_entry); the day\'s exercise (activities, with activity_id) and free-text notes (day_notes and per-meal notes, with note_id) come along too. ' +
+        'Meals with neither entries nor notes are left out. For several days use get_diary_range.',
       inputSchema: {
         date: z.string().optional().describe(dateDescription),
       },
@@ -343,19 +350,19 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       description:
         'Which foods supplied the most protein (or energy, carbohydrate, fat, fibre, sugar, saturated fat, salt) over a range of days, summed per food. Read-only. ' +
         'Use this for questions like "what gave me the most protein this week" — the sums are done exactly, which beats adding up get_diary_range lines yourself. ' +
-        `Same range rules as get_diary_range (both end days included, at most ${MAX_RANGE_DAYS} days). ` +
+        `Both end days are included and the range may be up to ${MAX_LONG_RANGE_DAYS} days (the answer stays short however long the range). ` +
         'Foods are matched by exact name. A food whose value is unknown on every line is listed under "unknown", never counted as 0; if some lines are unknown its total is a minimum (unknown_lines > 0). ' +
         'Days that failed to load are listed in failed_dates, so the ranking may be incomplete. A login failure fails the whole call.',
       inputSchema: {
         from: z.string().describe('First day, dd.MM.yyyy.'),
-        to: z.string().describe(`Last day, dd.MM.yyyy. At most ${MAX_RANGE_DAYS} days from "from", both included.`),
+        to: z.string().describe(`Last day, dd.MM.yyyy. At most ${MAX_LONG_RANGE_DAYS} days from "from", both included.`),
         nutrient: z.enum(RANKABLE_NUTRIENTS).describe('Which value to add up. "energy" is in the diary\'s energy unit (kcal), the rest in grams.'),
         limit: z.number().int().min(1).max(50).optional().describe('How many top foods to return. Defaults to 10.'),
       },
       annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     guard('get_nutrient_ranking', async ({ from, to, nutrient, limit }) => {
-      const r = rankNutrient(await kt.getDiaryRange(from, to), nutrient, limit ?? 10);
+      const r = rankNutrient(await kt.getDiaryRange(from, to, MAX_LONG_RANGE_DAYS), nutrient, limit ?? 10);
       return json({
         from,
         to,
@@ -442,6 +449,434 @@ export function registerTools(server: McpServer, kt: KtClient): void {
       });
     }),
   );
+
+  // ---------------------------------------------------------------------
+  // Recipes, balance, weight
+  // ---------------------------------------------------------------------
+
+  server.registerTool(
+    'get_meal_details',
+    {
+      title: 'See what is inside a saved recipe',
+      description:
+        'List the ingredients of one of the user\'s saved recipes, each with its amount and nutrition, plus the totals for the whole recipe (not per portion). Read-only. ' +
+        'A diary line logged from a recipe only shows the recipe\'s name, so use this to answer "how much protein comes from what in my bábovka". Find the recipe id with list_my_meals. ' +
+        'An ingredient the site gives no figures for has null nutrition and is counted in unknown_ingredients; the totals then cover the known ones only.',
+      inputSchema: { meal_id: z.string().min(1).describe('Recipe id from list_my_meals.') },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_meal_details', async ({ meal_id }) => {
+      const meal = await kt.getMealDetails(meal_id);
+      const sum = (pick: (n: Nutrition) => number | null) => {
+        const known = meal.ingredients.map(i => (i.nutrition ? pick(i.nutrition) : null)).filter((v): v is number => v !== null);
+        return known.length === 0 ? null : Math.round(known.reduce((a, b) => a + b, 0) * 100) / 100;
+      };
+      return json({
+        meal_id: meal.id,
+        title: meal.title,
+        ingredients: meal.ingredients.map(i => ({
+          title: i.title,
+          amount: i.amount,
+          unit: i.unitTitle,
+          weight: i.weight,
+          energy: i.nutrition?.energy ?? null,
+          protein: i.nutrition?.protein ?? null,
+          carbohydrate: i.nutrition?.carbs ?? null,
+          fat: i.nutrition?.fat ?? null,
+          fibre: i.nutrition?.fibre ?? null,
+          sugar: i.nutrition?.sugar ?? null,
+          saturated_fat: i.nutrition?.saturatedFat ?? null,
+          salt: i.nutrition?.salt ?? null,
+          error: i.error,
+        })),
+        totals_for_whole_recipe: {
+          energy: sum(n => n.energy),
+          protein: sum(n => n.protein),
+          carbohydrate: sum(n => n.carbs),
+          fat: sum(n => n.fat),
+          fibre: sum(n => n.fibre),
+          sugar: sum(n => n.sugar),
+          saturated_fat: sum(n => n.saturatedFat),
+          salt: sum(n => n.salt),
+        },
+        unknown_ingredients: meal.ingredients.filter(i => i.nutrition === null).length,
+        reading_guide: 'Energy is in kcal, the rest in grams, all for the amounts listed (the whole recipe). null = the site has no figure.',
+      });
+    }),
+  );
+
+  server.registerTool(
+    'get_day_balance',
+    {
+      title: 'Get a day\'s energy balance and nutrient goals',
+      description:
+        'The site\'s own balance for one day: energy eaten against the goal, energy spent (basal + activity), and goal-vs-actual for protein, carbohydrate, fat, fibre, sugar, salt and more, each with its unit. Read-only. ' +
+        'Use it for "am I on track today", "how much protein do I still need". net_balance is intake minus output (negative = deficit); planned_deficit is the site\'s own "Kalorický deficit", i.e. goal minus maintenance — a plan, not what the day came to. ' +
+        'Intake 0 means nothing was logged.',
+      inputSchema: { date: z.string().optional().describe(dateDescription) },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_day_balance', async ({ date }) => json(presentBalance(await kt.getDayBalance(date)))),
+  );
+
+  server.registerTool(
+    'get_balance_range',
+    {
+      title: 'Get energy balance and nutrient averages over many days',
+      description:
+        `Daily balance (as get_day_balance) for every day from \`from\` to \`to\`, both included, at most ${MAX_LONG_RANGE_DAYS} days, plus averages. Read-only. ` +
+        'Use it for trends: "how was my deficit this month", "did I hit my protein goal on average". ' +
+        'Days with no intake are treated as not logged and left out of the averages (days.logged says how many counted). Days that failed to load are listed in failed_dates. A login failure fails the whole call.',
+      inputSchema: {
+        from: z.string().describe('First day, dd.MM.yyyy.'),
+        to: z.string().describe(`Last day, dd.MM.yyyy. At most ${MAX_LONG_RANGE_DAYS} days from "from", both included.`),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_balance_range', async ({ from, to }) => {
+      const outcomes = await kt.getBalanceRange(from, to);
+      const summary = summarizeBalances(outcomes);
+      return json({
+        from,
+        to,
+        energy_unit: summary.energyUnit,
+        days: summary.days,
+        failed_dates: summary.failedDates,
+        averages_over_logged_days: {
+          intake: summary.averageIntake,
+          output: summary.averageOutput,
+          net_balance: summary.averageNetBalance,
+          nutrients: summary.nutrients.map(n => ({
+            code: n.code,
+            title: n.title,
+            unit: n.unit,
+            average_actual: n.averageActual,
+            goal: n.goal,
+            days: n.days,
+          })),
+        },
+        per_day: outcomes.map(o =>
+          o.status === 'error'
+            ? { date: o.date, status: 'error', error: o.error }
+            : {
+                date: o.date,
+                intake: o.balance.intake,
+                target: o.balance.target,
+                output: o.balance.output,
+                net_balance: o.balance.netBalance,
+                weight: o.balance.weight,
+                protein: o.balance.nutrients.find(n => n.code === 'protein')?.actual ?? null,
+              },
+        ),
+      });
+    }),
+  );
+
+  server.registerTool(
+    'get_weight_history',
+    {
+      title: 'Get weight history',
+      description:
+        'The user\'s recorded body weights for the month around a day, with the current weight and the target weight. Read-only. Use it for "how has my weight changed" or to combine with get_balance_range.',
+      inputSchema: { date: z.string().optional().describe('Day to centre on, dd.MM.yyyy. Omit for today.') },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('get_weight_history', async ({ date }) => {
+      const h = await kt.getWeightHistory(date);
+      return json({ unit: h.unit, current: h.current, target: h.target, records: h.records });
+    }),
+  );
+
+  server.registerTool(
+    'log_weight',
+    {
+      title: 'Record a body weight',
+      description:
+        'Write a body weight into the user\'s diary for a day. This changes their real weight history, and the site keeps one value per date, so it replaces any weight already recorded for that date. Confirm the value first. ' +
+        'Omit the date for today. Returns what the site lists for that date afterwards.',
+      inputSchema: {
+        weight_kg: z.number().min(20).max(500).describe('Weight in kg, e.g. 81.9.'),
+        date: z.string().optional().describe(dateDescription),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    guard('log_weight', async ({ weight_kg, date }) => {
+      const r = await kt.logWeight({ weightKg: weight_kg, date });
+      return json({ logged: true, date: r.date, requested_kg: r.requested, recorded_kg: r.recorded, note: r.recorded === null ? 'The value could not be read back; check it with get_weight_history.' : undefined });
+    }),
+  );
+
+  // ---------------------------------------------------------------------
+  // Favourites
+  // ---------------------------------------------------------------------
+
+  const fold = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+
+  server.registerTool(
+    'list_favorite_foods',
+    {
+      title: 'List the user\'s favourite foods',
+      description:
+        'The foods the user marked as favourites on kaloricketabulky.cz. Read-only. ' +
+        'Call this FIRST when the user says "my favourite ..." or "my usual ..." ("add my favourite sourdough bread"): pass `query` to filter by name (accents and case ignored), take the food_id, then use get_food_portions and log_food as usual. ' +
+        'If nothing matches, fall back to search_food.',
+      inputSchema: {
+        query: z.string().optional().describe('Part of the food name, e.g. "kvasový chléb". Omit to list all favourites.'),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('list_favorite_foods', async ({ query }) => {
+      const all = await kt.listFavoriteFoods();
+      const q = query ? fold(query) : '';
+      const foods = q ? all.filter(f => fold(f.title).includes(q)) : all;
+      return json({
+        total_favorites: all.length,
+        matches: foods.map(f => ({ food_id: f.id, title: f.title })),
+        hint: foods.length === 0 && q ? 'No favourite matches. Try search_food with the same words.' : undefined,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'list_common_foods',
+    {
+      title: 'List the foods the user logs most often',
+      description:
+        'The foods the user logs most often, as the site ranks them. Read-only. Useful for "what do I usually eat" and as a shortcut when the user names a food they log all the time. The food_id works with get_food_portions and log_food.',
+      inputSchema: {},
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('list_common_foods', async () => {
+      const foods = await kt.listCommonFoods();
+      return json({ foods: foods.map(f => ({ food_id: f.id, title: f.title })) });
+    }),
+  );
+
+  server.registerTool(
+    'add_favorite_food',
+    {
+      title: 'Mark a food as a favourite',
+      description: 'Add a food to the user\'s favourites (food_id from search_food). Harmless and reversible with remove_favorite_food. Returns whether the list now shows it.',
+      inputSchema: { food_id: z.string().min(1).describe('The food id returned by search_food.') },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('add_favorite_food', async ({ food_id }) => json({ favorite: true, confirmed: (await kt.setFavoriteFood(food_id, true)).confirmed })),
+  );
+
+  server.registerTool(
+    'remove_favorite_food',
+    {
+      title: 'Remove a food from the favourites',
+      description: 'Remove a food from the user\'s favourites (food_id from list_favorite_foods). The food itself and any diary entries are untouched. Returns whether the list no longer shows it.',
+      inputSchema: { food_id: z.string().min(1).describe('The food id returned by list_favorite_foods.') },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('remove_favorite_food', async ({ food_id }) => json({ favorite: false, confirmed: (await kt.setFavoriteFood(food_id, false)).confirmed })),
+  );
+
+  // ---------------------------------------------------------------------
+  // Activities and notes
+  // ---------------------------------------------------------------------
+
+  server.registerTool(
+    'search_activity',
+    {
+      title: 'Search activities',
+      description: 'Find an activity (walking, cycling, ...) in the kaloricketabulky.cz catalogue by Czech name, to get the activity_id log_activity needs. Read-only.',
+      inputSchema: {
+        query: z.string().min(1).describe('Activity name in Czech, e.g. "chůze" or "jízda na kole".'),
+        limit: z.number().int().min(1).max(25).optional().describe('Maximum results. Defaults to 10.'),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('search_activity', async ({ query, limit }) => {
+      const hits = await kt.searchActivities(query, limit ?? 10);
+      return json({ results: hits.map(h => ({ activity_id: h.id, title: h.title })), hint: hits.length === 0 ? 'No matches. Try a different Czech term.' : undefined });
+    }),
+  );
+
+  server.registerTool(
+    'log_activity',
+    {
+      title: 'Log an activity',
+      description:
+        'Write an exercise into the user\'s diary for a given number of minutes (activity_id from search_activity). This modifies their real diary, so confirm first. ' +
+        'The site computes the energy burned. Only activities the site measures in hours (walking, cycling and similar) are supported. Omit the date for today. ' +
+        'Returns the new activity line, including its activity_id for delete_activity.',
+      inputSchema: {
+        activity_id: z.string().min(1).describe('Activity id from search_activity.'),
+        minutes: z.number().positive().max(1440).describe('Duration in minutes.'),
+        date: z.string().optional().describe(dateDescription),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    guard('log_activity', async ({ activity_id, minutes, date }) => {
+      const r = await kt.logActivity({ activityId: activity_id, minutes, date });
+      return json({
+        logged: true,
+        date: r.date,
+        activity: r.added ? presentActivity(r.added) : null,
+        note: r.added ? undefined : 'The activity was accepted but could not be identified afterwards; check it with get_day_entries.',
+      });
+    }),
+  );
+
+  server.registerTool(
+    'delete_activity',
+    {
+      title: 'Delete a logged activity',
+      description:
+        'Permanently remove one activity line from a day (activity_id and date from get_day_entries). This cannot be undone, so confirm which one first. ' +
+        'Activities imported from a watch or phone app may be imported again by that sync.',
+      inputSchema: {
+        date: z.string().describe('The day the activity is on, dd.MM.yyyy.'),
+        activity_id: z.string().min(1).describe('activity_id from get_day_entries.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    guard('delete_activity', async ({ date, activity_id }) => {
+      const r = await kt.deleteActivity({ date, activityId: activity_id });
+      return json({
+        deleted: true,
+        date: r.date,
+        activity: presentActivity(r.deleted),
+        confirmed_gone: r.confirmed,
+        note: r.confirmed === true ? undefined : 'The site accepted the deletion but the day could not be confirmed afterwards; check it with get_day_entries before trying again.',
+      });
+    }),
+  );
+
+  server.registerTool(
+    'add_diary_note',
+    {
+      title: 'Add a note to a day',
+      description:
+        'Write a free-text note on a day, or on one meal of that day (e.g. "felt full", "restaurant, estimated portions"). Modifies the real diary, so confirm the text first. ' +
+        'Returns the note with its note_id for delete_diary_note.',
+      inputSchema: {
+        date: z.string().describe('The day, dd.MM.yyyy.'),
+        text: z.string().min(1).max(1000).describe('The note.'),
+        meal: z.enum(MEAL_IDS).optional().describe(`Attach the note to one meal instead of the whole day. ${mealDescription}`),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    guard('add_diary_note', async ({ date, text, meal }) => {
+      const r = await kt.addNote({ date, text, meal });
+      return json({
+        added: true,
+        date: r.date,
+        note: r.added ? { note_id: r.added.note.id, text: r.added.note.text, meal: r.added.meal } : null,
+        hint: r.added ? undefined : 'The note was accepted but could not be identified afterwards; check it with get_day_entries.',
+      });
+    }),
+  );
+
+  server.registerTool(
+    'delete_diary_note',
+    {
+      title: 'Delete a note',
+      description: 'Permanently remove one note from a day (note_id and date from get_day_entries). Cannot be undone, so confirm which note first.',
+      inputSchema: {
+        date: z.string().describe('The day the note is on, dd.MM.yyyy.'),
+        note_id: z.string().min(1).describe('note_id from get_day_entries.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true },
+    },
+    guard('delete_diary_note', async ({ date, note_id }) => {
+      const r = await kt.deleteNote({ date, noteId: note_id });
+      return json({
+        deleted: true,
+        date: r.date,
+        note: { text: r.deleted.note.text, meal: r.deleted.meal },
+        confirmed_gone: r.confirmed,
+        hint: r.confirmed === true ? undefined : 'The site accepted the deletion but the day could not be confirmed afterwards; check it with get_day_entries before trying again.',
+      });
+    }),
+  );
+
+  // ---------------------------------------------------------------------
+  // Copying and export
+  // ---------------------------------------------------------------------
+
+  server.registerTool(
+    'copy_meal',
+    {
+      title: 'Copy a meal to another day',
+      description:
+        'Copy every entry of one meal (e.g. yesterday\'s lunch) onto another day, with the same quantities, optionally into a different meal slot. Use it for "log the same dinner as yesterday". ' +
+        'This writes to the real diary and is NOT idempotent — running it twice duplicates the entries — so confirm first and never retry blindly. ' +
+        'Returns how many entries the target day gained.',
+      inputSchema: {
+        from_date: z.string().describe('Day to copy from, dd.MM.yyyy.'),
+        meal: z.enum(MEAL_IDS).describe(`Which meal to copy. ${mealDescription}`),
+        to_date: z.string().describe('Day to copy onto, dd.MM.yyyy.'),
+        to_meal: z.enum(MEAL_IDS).optional().describe('Meal slot on the target day. Omit to use the same meal.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    guard('copy_meal', async ({ from_date, meal, to_date, to_meal }) => {
+      const r = await kt.copyMeal({ fromDate: from_date, meal, toDate: to_date, toMeal: to_meal });
+      return json({
+        copied: true,
+        from: `${r.fromDate} ${r.fromMeal}`,
+        to: `${r.toDate} ${r.toMeal}`,
+        lines_requested: r.lines,
+        entries_added_to_target_day: r.added,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'copy_day',
+    {
+      title: 'Copy a whole day to another day',
+      description:
+        'Copy every meal of one day onto another day, meal by meal into the same slots. Activities and notes are not copied. Writes to the real diary and is NOT idempotent — running it twice duplicates everything — so confirm first. ' +
+        'If a meal fails the copy stops and the result lists which meals were already copied; do not simply rerun it.',
+      inputSchema: {
+        from_date: z.string().describe('Day to copy from, dd.MM.yyyy.'),
+        to_date: z.string().describe('Day to copy onto, dd.MM.yyyy.'),
+      },
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    guard('copy_day', async ({ from_date, to_date }) => {
+      const r = await kt.copyDay({ fromDate: from_date, toDate: to_date });
+      return json({
+        completed: r.failed === null,
+        from: r.fromDate,
+        to: r.toDate,
+        copied_meals: r.copied.map(c => ({ meal: c.fromMeal, lines: c.lines, entries_added: c.added })),
+        failed: r.failed,
+      });
+    }),
+  );
+
+  server.registerTool(
+    'export_diary_csv',
+    {
+      title: 'Export diary entries as CSV',
+      description:
+        `Every logged entry from \`from\` to \`to\` (at most ${MAX_EXPORT_DAYS} days) as CSV text, ready to save as a .csv file or paste into Excel / Google Sheets. Read-only. ` +
+        'One row per entry: date, meal, title, kind, quantity, energy and nutrients. Numbers use a dot as decimal separator and unknown values are empty cells, not 0. ' +
+        'Days that failed to load are listed in the metadata and contribute no rows.',
+      inputSchema: {
+        from: z.string().describe('First day, dd.MM.yyyy.'),
+        to: z.string().describe(`Last day, dd.MM.yyyy. At most ${MAX_EXPORT_DAYS} days from "from", both included.`),
+      },
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    },
+    guard('export_diary_csv', async ({ from, to }) => {
+      const outcomes = await kt.getDiaryRange(from, to, MAX_EXPORT_DAYS);
+      const { csv, rows } = entriesToCsv(outcomes);
+      const failed = outcomes.filter(o => o.status === 'error').map(o => o.date);
+      return {
+        content: [
+          { type: 'text' as const, text: JSON.stringify({ from, to, rows, failed_dates: failed, note: 'The CSV follows in the next block, header row first.' }) },
+          { type: 'text' as const, text: csv },
+        ],
+      };
+    }),
+  );
 }
 
 const ENTRY_NOTES =
@@ -482,22 +917,46 @@ function presentDay(day: DiaryDay) {
     date: day.date,
     entry_count: day.entryCount,
     energy_unit: day.energyUnit,
-    activities: day.activities?.map(a => ({
-      title: a.title,
-      duration_minutes: a.durationMinutes,
-      steps: a.steps,
-      energy: a.energy,
-      energy_unit: a.energyUnit,
-    })) ?? null,
-    day_notes: day.notes?.map(n => ({ text: n.text, created: n.created })) ?? null,
+    activities: day.activities?.map(presentActivity) ?? null,
+    day_notes: day.notes?.map(n => ({ note_id: n.id, text: n.text, created: n.created })) ?? null,
     // Empty slots add nothing but length, which matters over a 14-day range.
     meals: day.meals
-      .filter(meal => meal.entries.length > 0)
+      .filter(meal => meal.entries.length > 0 || (meal.notes?.length ?? 0) > 0)
       .map(meal => ({
         meal_id: meal.id,
         meal: meal.title,
         energy_total: meal.energyTotal,
         entries: meal.entries.map(presentEntry),
+        notes: meal.notes && meal.notes.length > 0 ? meal.notes.map(n => ({ note_id: n.id, text: n.text, created: n.created })) : undefined,
       })),
+  };
+}
+
+function presentActivity(a: DiaryActivity) {
+  return {
+    activity_id: a.id,
+    title: a.title,
+    duration_minutes: a.durationMinutes,
+    steps: a.steps,
+    energy: a.energy,
+    energy_unit: a.energyUnit,
+  };
+}
+
+function presentBalance(b: DayBalance) {
+  return {
+    date: b.date,
+    energy_unit: b.energyUnit,
+    intake: b.intake,
+    target: b.target,
+    remaining: b.remaining,
+    output: b.output,
+    basal: b.basal,
+    activity_energy: b.activityEnergy,
+    maintenance_intake: b.maintenance,
+    planned_deficit: b.plannedDeficit,
+    net_balance: b.netBalance,
+    weight: b.weight,
+    nutrients: b.nutrients.map(n => ({ code: n.code, title: n.title, unit: n.unit, goal: n.goal, actual: n.actual, percent: n.percent })),
   };
 }
