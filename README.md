@@ -47,6 +47,14 @@ Jakmile je agent připojený, přestane být zapisování jídel otravným prokl
 
 - **Řešte, když váha nejde dolů.** „Váha mi stojí, zjisti proč a navrhni úpravu cílů." Agent načte cíle (`get_goals`), odhadne z jídelníčku a vývoje váhy, kolik tělo opravdu spaluje, a porovná to s tím, co předpokládá web (`get_energy_model`). Pak navrhne konkrétní změnu (úroveň aktivity, vlastní bazál, makra) a **zapíše ji až po vašem souhlasu** (`update_goals`). Doporučené je spustit prompt `plateau_review`.
 
+- **Sledujte víc než váhu.** „Zapiš obvod pasu 94 cm." „Jak se mi mění pas a procento tuku?" Když váha stojí, ale pas klesá, ubývá tuk, i když to váha neukazuje. `plateau_review` se na měření podívá sám.
+
+- **Zeptejte se webu na jeho vlastní rozbor.** „Jak plním cíle za posledních 14 dní?" `get_goal_analysis` vrátí průměry proti cílům, největší zdroje bílkovin či tuku a tipy, které web sám odvodil. Stejně jde zjistit, jestli dost pijete (`get_hydration`).
+
+- **Najděte recept podle čísel.** „Najdi večeři do 500 kcal na porci s aspoň 35 g bílkovin do 30 minut." `search_recipes` hledá ve veřejných receptech, `get_recipe` ukáže suroviny, postup a výživu na porci.
+
+- **Opravte, kam jste to zapsali.** „Ten tvaroh patří k snídani, ne k obědu." `move_diary_entry` položku přesune, bez mazání a nového zápisu.
+
 - **Vytáhněte data do tabulky.** „Exportuj posledních 30 dní do CSV." Výsledek vložíte do Excelu nebo Google Sheets.
 
 ## Nástroje
@@ -63,6 +71,7 @@ Nástroje, které **mění deník**, jsou označené ✏️. Agent by je měl vo
 | `log_food` ✏️ | Zapíše záznam o jídle do jídelníčku. |
 | `list_favorite_foods` | Oblíbené potraviny, volitelně filtrované podle názvu (bez ohledu na diakritiku a velikost písmen). Id funguje s `get_food_portions` a `log_food`. Pouze čtení. |
 | `list_common_foods` | Potraviny, které zapisujete nejčastěji. Pouze čtení. |
+| `log_custom_food` ✏️ | Zapíše **vlastní** potravu s názvem a energií, které zadáte (jídlo z restaurace, údaj z obalu), volitelně s gramy živin. Je to jednorázový řádek: do databáze ani mezi oblíbené se nepřidá a později se nevyhledá. Energie je v kcal; pokud váš deník pracuje v kJ, nástroj kcal odmítne a řekne, jakou jednotku použít, takže se kcal nikdy neuloží jako kJ. Má-li potravina v databázi záznam, použijte `search_food` a `log_food`. |
 | `add_favorite_food` ✏️ / `remove_favorite_food` ✏️ | Přidá potravinu mezi oblíbené, resp. ji odebere, a ověří výsledek. Neovlivní žádné záznamy. |
 
 ### Co jsem snědl (čtení)
@@ -70,7 +79,7 @@ Nástroje, které **mění deník**, jsou označené ✏️. Agent by je měl vo
 | Nástroj | Účel |
 |---|---|
 | `get_day_summary` | Surové denní součty, cíle a týdenní grafy tak, jak je posílá web. Jednotlivé položky neobsahuje. |
-| `get_day_entries` | Jednotlivé zapsané položky jednoho dne (potraviny i uložené recepty), seskupené podle jídla: název, zapsané množství a nutriční hodnoty; navíc aktivity a poznámky dne. Každá položka nese `entry_id`, aktivita `activity_id` a poznámka `note_id`. |
+| `get_day_entries` | Jednotlivé zapsané položky jednoho dne (potraviny i uložené recepty), seskupené podle jídla: název, zapsané množství a nutriční hodnoty (včetně vápníku, sodíku a cholesterolu v mg, trans a nenasycených tuků a alkoholu; neznámá hodnota je `null`, ne 0); navíc aktivity a poznámky dne. Každá položka nese `entry_id`, aktivita `activity_id` a poznámka `note_id`. |
 | `get_diary_range` | Totéž pro rozsah dnů `from`–`to` (obě krajní data včetně, nejvýš **14** dní). U každého dne uvede, zda je vyplněný, prázdný, nebo se nepodařilo načíst. |
 | `get_nutrient_ranking` | Seřadí potraviny podle součtu zvoleného nutrientu (bílkoviny, energie, tuky, sacharidy, vláknina, cukry, nasycené tuky, sůl) za rozsah až **90** dní. |
 | `get_day_balance` | Bilance jednoho dne podle webu: příjem proti cíli, výdej (bazál + aktivity), čistá bilance a cíl vs. skutečnost u bílkovin, sacharidů, tuků a dalších živin, vždy s jednotkou. |
@@ -83,6 +92,7 @@ Nástroje, které **mění deník**, jsou označené ✏️. Agent by je měl vo
 | Nástroj | Účel |
 |---|---|
 | `update_diary_entry` ✏️ | Změní zapsané množství (a volitelně jednotku) jedné položky. Položky z uloženého receptu web upravit neumí. |
+| `move_diary_entry` ✏️ | Přesune položku do jiného jídla téhož dne, na jiný den, nebo obojí (jako přetažení na webu). Množství se nemění. Výsledek se přečte zpět a odpověď říká, kam položka dopadla. |
 | `delete_diary_entry` ✏️ | Smaže jednu položku. Předem ověří, že je v daném dni, potom den načte znovu a potvrdí, že je pryč. |
 | `copy_meal` ✏️ | Zkopíruje celé jídlo (např. včerejší oběd) na jiný den, volitelně do jiného jídla. **Neidempotentní** — druhé volání vytvoří duplicity. |
 | `copy_day` ✏️ | Zkopíruje všechna jídla dne jídlo po jídle do stejných slotů (aktivity a poznámky se nekopírují). Při chybě se zastaví a uvede, co už bylo zkopírováno. Neidempotentní. |
@@ -92,6 +102,23 @@ Nástroje, které **mění deník**, jsou označené ✏️. Agent by je měl vo
 | `add_diary_note` ✏️ / `delete_diary_note` ✏️ | Přidá poznámku k celému dni nebo k jednomu jídlu, resp. ji smaže. |
 | `log_weight` ✏️ | Zapíše hmotnost. Web drží jednu hodnotu na datum, takže přepíše případnou existující. |
 
+### Oblíbené a pravidelné aktivity, šablony dne
+
+| Nástroj | Účel |
+|---|---|
+| `list_favorite_activities` | Oblíbené aktivity s kcal na kg a minutu a kcal za minutu pro vaši současnou váhu. `activity_id` funguje s `log_activity`. Pouze čtení. |
+| `list_common_activities` | Aktivity, které zapisujete nejčastěji. Pouze čtení. Na webu je seznam prázdný, dokud se nenaplní používáním; tvar neprázdného seznamu se při vývoji nedal ověřit. |
+| `log_custom_activity` ✏️ | Zapíše **vlastní** aktivitu s názvem, délkou v minutách a spálenou energií (lekce, zápas). Jednorázový řádek, do katalogu se nepřidá. Stejná kontrola jednotky energie jako u vlastní potraviny. Existuje-li aktivita v katalogu, použijte `search_activity` a `log_activity`, kde energii počítá web podle vaší váhy. |
+| `add_favorite_activity` ✏️ / `remove_favorite_activity` ✏️ | Přidá aktivitu mezi oblíbené, resp. ji odebere, a ověří výsledek. Zápisy v deníku se nemění. |
+| `list_regular_activities` | Týdenní rutina: aktivity, které web opakuje v zadané dny. Každý den má vlastní `regular_activity_id`. Pouze čtení. |
+| `add_regular_activity` ✏️ | Přidá aktivitu do týdenní rutiny na vybrané dny (v minutách). Je to **trvalá změna**: web ji od teď počítá v těchto dnech, takže mění energetický obraz každého takového dne. Při nastaveném paušálním výdeji (úroveň aktivity nad sedavou) se může započítat dvakrát. Stejnou aktivitu na stejný den nepřidá podruhé. |
+| `delete_regular_activity` ✏️ | Smaže jeden den rutiny. Přijme jen id, které web právě vypsal. Už zapsané aktivity v deníku se nemění. |
+| `update_activity` ✏️ | Změní délku zapsané aktivity (v minutách); web přepočítá energii. Jen aktivity měřené v hodinách. Aktivity ze synchronizace (hodinky, telefon) web většinou upravit nedovolí. |
+| `list_day_templates` / `get_day_template` | Uložené šablony dne („Moje jídelníčky“) a jejich obsah po jídlech i s poznámkami. Pouze čtení. |
+| `save_day_as_template` ✏️ | Uloží potraviny zvoleného dne jako novou šablonu (volitelně i poznámky). Aktivity se do šablony uložit nedají. Druhé volání vytvoří druhou šablonu. |
+| `apply_day_template` ✏️ | Zapíše šablonu do 1–7 dnů. Řádky se k dni **přidají**, takže druhé použití nebo použití na den s jídlem je zdvojí. Výsledek porovná počet záznamů každého dne před a po. |
+| `delete_day_template` ✏️ | Smaže uloženou šablonu. Dny, do kterých byla dřív zapsána, se nemění. |
+
 ### Cíle a odhad výdeje
 
 | Nástroj | Účel |
@@ -100,15 +127,36 @@ Nástroje, které **mění deník**, jsou označené ✏️. Agent by je měl vo
 | `update_goals` ✏️ | Změní cíl, cílovou váhu, úroveň aktivity (1; 1,2; 1,375; 1,55; 1,725; 1,9), vlastní bazál, vlastní kalorický cíl, cíle živin (g nebo % pro bílkoviny, sacharidy a tuky společně) a pitný režim. Mění jen předaná pole, `null` vlastní hodnotu zruší. Vrací stav před, po, co web nepřevzal a varování. Váhu, e-mail ani heslo nemění. |
 | `get_energy_model` (`weeks`, `to`) | Odhad skutečného výdeje: průměrný příjem plus energie uvolněná trendem váhy (1 kg ≈ 7 700 kcal) proti výdeji, který předpokládá web. Vrací rozptyl, spolehlivost (`low` / `medium` / `high`) a výhrady. Dnešek se nezapočítává. |
 
+### Statistiky a měření
+
+| Nástroj | Účel |
+|---|---|
+| `get_goal_analysis` (`from`, `to`, `meal`, `top_sources`) | Vlastní analýza jídelníčku z webu za období až **366** dní: průměrný denní příjem proti cíli u energie, bílkovin, sacharidů, tuků (i nasycených), vlákniny, soli, vápníku a pitného režimu, největší zdroje každé živiny (potraviny i skupiny potravin) a osobní tipy webu („málo bílkovin 3 dny po sobě“). `meal` zúží analýzu na jedno jídlo. Pouze čtení. |
+| `get_hydration` (`from`, `to`) | Litry vypité za den proti dennímu cíli (ten roste s aktivitou), s průměry. Den s 0 l může být jen nezapsaný den, proto jsou průměry zvlášť pro všechny dny a pro dny s nějakým pitím. Pití se zapisuje jako obyčejná potravina (`log_food`). Pouze čtení. |
+| `list_tracked_measurements` (`from`, `to`) | Sledované údaje vedle váhy: obvod pasu, boků, břicha, krku, paže, stehna, lýtka, předloktí, hrudníku (horní i dolní), tuky %, svaly %, voda %, viscerální tuky. Hodnoty s `measurement_id`, změna za období a seznam druhů, které jdou začít sledovat. Pouze čtení. |
+| `add_tracked_measurement` ✏️ | Zapíše naměřenou hodnotu. Web drží jednu hodnotu na měření a datum, takže další zápis za stejný den **přepíše** předchozí. Dosud nesledované měření web začne sledovat s hodnotou pro **dnešek** (formulář nemá datum), proto se pro něj datum v minulosti odmítne. |
+| `delete_tracked_measurement` ✏️ | Smaže jednu hodnotu měření. Přijme jen `measurement_id` z `list_tracked_measurements`, takže se nikdy nedotkne váhy (web maže váhu stejnou cestou). Celé sledování (všechny hodnoty) záměrně smazat nejde. |
+
 ### Recepty
 
 | Nástroj | Účel |
 |---|---|
 | `create_meal` ✏️ | Uloží recept složený z existujících potravin. |
 | `list_my_meals` | Vypíše uložené recepty s jejich id a celkovou energií. |
-| `get_meal_details` | Suroviny uloženého receptu s množstvím a nutričními hodnotami a součty za celý recept (ne za porci). |
-| `log_meal` ✏️ | Zaloguje celý uložený recept jako jeden záznam. |
+| `get_meal_details` | Suroviny uloženého receptu s množstvím a nutričními hodnotami, součty za celý recept (ne za porci), celková váha a počet porcí (pokud je autor uvedl). |
+| `log_meal` ✏️ | Zaloguje uložený recept jako jeden záznam: celý, nebo jeho část podle `portions` (počet porcí), `grams` (snědená hmotnost) či `percent` (podíl). Web surovinám přepočítá množství a výsledek se ověří proti podílu energie receptu. |
 | `delete_meal` ✏️ | Smaže uložený recept. |
+| `update_meal` ✏️ | Přejmenuje uložený recept, nastaví počet porcí a nahradí postup (kroky). Suroviny se nemění. Výsledek se přečte zpět. |
+| `change_meal_ingredients` ✏️ | Přidá, změní nebo odebere suroviny uloženého receptu podle id potraviny; nutriční hodnoty přepočítá web. Potravinu, která je v receptu víckrát, odmítne (nejasné, který řádek), přidání potraviny, která v receptu už je, také (použije se změna množství) a recept musí mít aspoň jednu surovinu. Při změně bez uvedené jednotky řádek jednotku zachová. Už zapsané řádky z receptu se nemění. |
+
+### Veřejné recepty
+
+Recepty ostatních uživatelů z `kaloricketabulky.cz/recepty`. Nejsou to vaše uložené recepty (to je `list_my_meals`).
+
+| Nástroj | Účel |
+|---|---|
+| `search_recipes` (`query`, `tags`, `sort`, `nutrient`, `min`, `max`, `max_preparation_minutes`, `page`, `limit`) | Hledání podle názvu, štítků (večeře, vegan, bez laktózy…), rozsahu jedné živiny na 100 g a doby přípravy. Řadí podle hodnocení, novosti nebo oblíbenosti. Vrací hodnoty **na 100 g**, počet všech shod a seznam štítků. Pouze čtení. |
+| `get_recipe` | Jeden recept: suroviny s množstvím, postup, štítky, doba přípravy, hodnocení a výživa za celý recept, na porci (jen když autor uvedl počet porcí) a na 100 g. Nic nezapisuje; k jídlu ho zapište přes `log_food` nebo uložte přes `create_meal`. Pouze čtení. |
 
 ### Prompty
 
@@ -153,6 +201,9 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 | „Zkopíruj celý včerejšek na zítra." | `copy_day` |
 | „Ulož tenhle recept z fotky jako jídlo." | `search_food` → `create_meal` |
 | „Zapiš moji mrkvovou bábovku k večeři." | `list_my_meals` → `log_meal` |
+| „K večeři jsem snědl jeden kousek bábovky (z 14 porcí)." | `list_my_meals` → `log_meal` s `portions` = 1 |
+| „Z té polévky jsem měl asi čtvrtinu." | `list_my_meals` → `log_meal` s `percent` = 25 |
+| „Z gulaše jsem snědl 350 g." | `get_meal_details` → `log_meal` s `grams` = 350 |
 | „Smaž ten uložený recept." | `list_my_meals` → `delete_meal` (po potvrzení) |
 | „Smaž dnešní chůzi." | `get_day_entries` → `delete_activity` |
 | „Smaž poznámku k obědu." | `get_day_entries` → `delete_diary_note` |
@@ -162,6 +213,31 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 | „Zruš můj vlastní bazál a vrať výpočet webu." | `get_goals` → `update_goals` (`null` vlastní hodnotu zruší) |
 | „Zapiš mou oblíbenou ovesnou kaši k snídani." | prompt `log_favorite` |
 | „Ukaž surové denní součty a týdenní grafy tak, jak je posílá web." | `get_day_summary` |
+| „Jak plním cíle za posledních 14 dní a co mi web radí?" | `get_goal_analysis` |
+| „Z čeho mám nejvíc soli?" | `get_goal_analysis` (zdroje) nebo `get_nutrient_ranking` s `sodium` |
+| „Kolik jsem tento týden vypil?" | `get_hydration` |
+| „Kolik alkoholu jsem za měsíc vypil a z čeho?" | `get_nutrient_ranking` s `alcohol` |
+| „Zapiš obvod pasu 94 cm." | `list_tracked_measurements` → `add_tracked_measurement` |
+| „Jak se mi mění pas a procento tuku?" | `list_tracked_measurements` |
+| „Smaž tu včerejší hodnotu pasu." | `list_tracked_measurements` → `delete_tracked_measurement` (po potvrzení) |
+| „Ten tvaroh patří k snídani, ne k obědu." | `get_day_entries` → `move_diary_entry` |
+| „Přesuň večeři z dneška na zítřek." | `get_day_entries` → `move_diary_entry` s `to_date` |
+| „Najdi večeři do 500 kcal na 100 g s aspoň 10 g bílkovin." | `search_recipes` |
+| „Jak se dělá ten recept a kolik má kcal na porci?" | `get_recipe` |
+| „Co obvykle cvičím?" | `list_common_activities` |
+| „Dal jsem si v restauraci řízek s bramborami, odhadem 900 kcal, a 40 g bílkovin." | `log_custom_food` |
+| „Zapiš hodinu tance, hodinky ukázaly 380 kcal." | `log_custom_activity` |
+| „Přejmenuj ten recept na Rychlá polévka a nastav 4 porce." | `list_my_meals` → `update_meal` |
+| „V té polévce dej místo mrkve 200 g celeru." | `list_my_meals` → `get_meal_details` → `change_meal_ingredients` |
+| „Zapiš moje oblíbené plavání na 45 minut." | `list_favorite_activities` → `log_activity` |
+| „Přidej plavání mezi oblíbené aktivity." | `search_activity` → `add_favorite_activity` |
+| „Každé pondělí a čtvrtek chodím 40 minut." | `search_activity` → `add_regular_activity` (po potvrzení) |
+| „Co mám v týdenní rutině?" | `list_regular_activities` |
+| „Zruš pondělní plavání z rutiny." | `list_regular_activities` → `delete_regular_activity` |
+| „To plavání včera trvalo 45 minut, ne 30." | `get_day_entries` → `update_activity` |
+| „Ulož dnešek jako šablonu Běžný den." | `save_day_as_template` |
+| „Zapiš do zítřka šablonu Běžný den." | `list_day_templates` → `get_day_template` → `apply_day_template` |
+| „Smaž šablonu Běžný den." | `list_day_templates` → `delete_day_template` (po potvrzení) |
 
 ### Jak se zápisy hlídají
 
@@ -169,6 +245,9 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 - Po zápisu se den **načte znovu** a výsledek (`confirmed_gone`, `entries_added_to_target_day`, …) se vrátí agentovi. Selže-li jen tohle dodatečné načtení, zápis se **nehlásí jako chyba**, aby ho agent nezopakoval; vrátí se `null` a poznámka, ať si výsledek zkontroluje.
 - Všechny nástroje s datem odmítají neexistující dny; web `31.02.2026` tiše přepočítá na 3. 3.
 - `update_goals` si profil načte čerstvě, změní jen předaná pole a zbytek formuláře pošle zpět tak, jak přišel (web ukládá celý formulář najednou). Hodnoty mimo rozumný rozsah a nepřípustné kombinace (např. procenta jen u části maker, součet nad 100) odmítne ještě před odesláním. Po zápisu profil přečte znovu a uvede pole, která web nepřevzal.
+- `delete_tracked_measurement` přijme jen id hodnoty, kterou web právě vypsal jako sledované měření. Web maže váhy stejnou cestou, takže jiné id se odmítne dřív, než se cokoli smaže. Nové sledování měření se zakládá s hodnotou pro dnešek (formulář nemá datum), proto se pro ně datum v minulosti odmítne.
+- `add_regular_activity` a `apply_day_template` jsou schválně označené jako neidempotentní a popis je vysvětluje agentovi. Rutina odmítne duplicitu na stejný den, šablona se zapíše nejvýš do 7 dnů najednou a výsledek hlásí `applied` jen tehdy, když každý den přibyl přesně počet potravin ze šablony. `delete_regular_activity` a `delete_day_template` přijmou jen id, které web právě vypsal.
+- `move_diary_entry` si položku nejdřív najde v daném dni, přesun provede po jednom kroku (den, pak jídlo) a výsledek přečte zpět. Pokud položka nedopadla tam, kam měla, `confirmed` není `true`.
 - Kopírování a přidávání poznámek a aktivit není idempotentní. Popisy nástrojů to agentovi říkají a výsledek `copy_day` při selhání uvádí, co už se zkopírovalo.
 
 ### Limity a cache
@@ -178,6 +257,10 @@ Klienti, které MCP prompty podporují, je nabídnou jako hotové zkratky:
 | `get_diary_range` | 14 dní (vrací každou položku) |
 | `export_diary_csv` | 31 dní |
 | `get_nutrient_ranking`, `get_balance_range` | 90 dní (vrací jen agregáty) |
+| `get_goal_analysis`, `get_hydration` | 366 dní (web počítá sám, jedním dotazem) |
+| `list_tracked_measurements` | 3 roky |
+| `search_recipes` | 25 receptů na stránku |
+| `apply_day_template` | 7 dnů na volání |
 
 Dny se načítají postupně, jeden po druhém. Dny, které už skončily, se v serveru **drží v paměti 5 minut**, takže opakovaný dotaz na delší rozsah je rychlý (30 dní: ~3 s → ~0,2 s). Dnešek a budoucnost se nikdy neukládají, každý zápis přes tento server paměť celou vyprázdní a čtení, která zápis ověřují, ji obcházejí. Změna provedená mimo tento server (v aplikaci) se tedy v minulých dnech může objevit až po uplynutí 5 minut.
 
@@ -192,11 +275,13 @@ npm run smoke              # pouze čtení
 npm run smoke -- --write   # navíc zápisy, viz níže
 ```
 
-S `--write` se všechny zápisy dějí **jen na zítřek**, který musí být zcela prázdný (jinak se skript zastaví). Zapíše a upraví potravinu, přidá poznámky a aktivitu, zkopíruje jídlo — a všechno zase smaže; přidá a odebere oblíbenou potravinu, která mezi oblíbenými nebyla, a znovu uloží poslední váhu se stejnou hodnotou. Dočasně také změní pitný režim, vlastní bazál a jeden cíl sacharidů, ověří, že se projevily v cíli deníku, vrátí je a porovná celý blok cílů s původním stavem (včetně kontroly, že uložení profilu nepřidalo záznam váhy). Na konci ověří, že je zítřek zase prázdný. Dnešní ani dřívější dny se nikdy nemění. Návratový kód 1 znamená, že některá kontrola selhala.
+S `--write` se všechny zápisy dějí **jen na zítřek**, který musí být zcela prázdný (jinak se skript zastaví). Zapíše a upraví potravinu, přidá poznámky a aktivitu, zkopíruje jídlo — a všechno zase smaže; zkušební aktivitu dočasně přidá mezi oblíbené a do týdenní rutiny (sobota, neděle) a změní délku zapsané aktivity; uloží zítřek jako šablonu, zapíše ji na pozítří a smaže (všechno zase odstraní); založí zkušební sledování „Obvod krku“ (jen když ho ještě nesledujete), zapíše a smaže hodnotu a nakonec smaže celé zkušební sledování; přesune zkušební položku do jiného jídla a, je-li i pozítří prázdný den, na ten den a zpět; přidá a odebere oblíbenou potravinu, která mezi oblíbenými nebyla, a znovu uloží poslední váhu se stejnou hodnotou. Dočasně také změní pitný režim, vlastní bazál a jeden cíl sacharidů, ověří, že se projevily v cíli deníku, vrátí je a porovná celý blok cílů s původním stavem (včetně kontroly, že uložení profilu nepřidalo záznam váhy). Na konci ověří, že je zítřek zase prázdný. Dnešní ani dřívější dny se nikdy nemění. Návratový kód 1 znamená, že některá kontrola selhala.
 
 ### Co zatím není
 
-Web umí víc, než tu dnes nabízíme. Vědomě chybí: úprava uloženého receptu a řádků zapsaných z receptu (web je řeší složitým formulářem), vlastní potravina a vlastní aktivita zadané ručně, úprava aktivit (jen přidání a smazání), zápis vypitých litrů (pitný cíl nastavit jde), sledované údaje (obvod pasu apod.), pravidelné aktivity, e-mail, heslo a ostatní nastavení účtu, sdílení, šablony dne a nativní XLS/PDF export webu (nahrazuje ho `export_diary_csv`).
+Web umí víc, než tu dnes nabízíme. Vědomě chybí: úprava řádků, které už byly z receptu zapsány do deníku (web je upravit neumí; smaže se a zapíše znovu), vlastní potravina uložená do databáze a vlastní aktivita uložená do katalogu (zapisují se jen jednorázově), aktivity v šabloně dne a násobení porcí při zápisu šablony (web je při zkoušce nepřevzal), seznam „nejčastějších aktivit“ (čtení je, ale tvar neprázdného seznamu se nedal ověřit), nastavení hodiny, kdy jste jídlo nebo aktivitu absolvovali, smazání celého sledování měření (jen jednotlivých hodnot), vlastní měření mimo 14 druhů webu, e-mail, heslo a ostatní nastavení účtu, přepínač „aktivity zvyšují potřebu živin“ a nativní XLS/PDF export webu (nahrazuje ho `export_diary_csv`). Pití se zapisuje jako obyčejná potravina (např. „voda čistá“ v mililitrech), zvláštní zápis litrů web nemá.
+
+**Sdílení deníku** (Nastavení → Sdílení) web nabízí tak, že další člověk (výživový poradce, rodina) dostane přístup k vašim jídelníčkům, statistikám a poznámkám, případně na omezené období nebo i se zápisem do deníku. Záměrně ho přes agenta nenabízím: je to přístup třetí osoby k zdravotním datům a změnu tohoto druhu má člověk dělat vědomě sám v nastavení webu, ne mimochodem v konverzaci.
 
 ### Recepty: množství
 
@@ -395,7 +480,7 @@ jméno klienta zobrazené ve formuláři.
 - **Bilance.** `planned_deficit` je údaj „Kalorický deficit" z webu, tedy cíl minus udržovací příjem, ne to, jak den skutečně dopadl; skutečný rozdíl je `net_balance` (příjem minus výdej, počítá ho server). Příjem 0 znamená, že se nic nezapsalo; web nerozliší „nejedl jsem nic" od „nezapsal jsem nic", a proto průměry v `get_balance_range` počítají jen dny s nenulovým příjmem.
 - **Detail receptu** dohledává výživové hodnoty každé suroviny zvlášť (jeden požadavek na surovinu). Surovina, k níž web hodnoty nedá, má `null` a součet se pak týká jen známých.
 - **Poznámky dne obsahují celý uživatelský záznam.** Odpověď webu u každé poznámky přibaluje i e-mail a hash hesla. Klient čte jen `id`, `text` a datum a nic dalšího nepředává. Aktivity z různých zdrojů (telefon, hodinky) se mohou překrývat. Pole `drinkRegime` bylo za 30 dní vždy 0, proto se nevystavuje.
-- **Část porce receptu zalogovat nejde.** Formulář pro přidání jídla sice nabízí `count` proti pseudo-jednotkám porce, procenta a gramy, ale server ho ignoruje a zaloguje vždy celý recept — měřeno na receptu o 249 kcal přidalo 0,5 porce i polovina váhy plných 249. `log_meal` proto nemá argument `portions`; když snědená byla jen část receptu, zalogujte suroviny jednotlivě přes `log_food`.
+- **Část receptu se loguje tak, jak to dělá web.** Server recept sám nepřepočítává: dialog na webu přepočítá v prohlížeči množství každé suroviny a odešle formulář s upravenými množstvími surovin; samotný nejvyšší `count` a jednotku server k výpočtu nepoužívá (proto dřívější pokus s ním zapsal vždy celý recept). `log_meal` dělá totéž, tedy podíl (`portions` / `grams` / `percent`) aplikuje na původní množství každé vybrané suroviny. Odešle se i zvolená jednotka a množství, takže řádek v deníku vypadá přesně jako zapsaný na webu („126 x 1 g“, „0,84 x porce“, „50%“), a výsledek porovná jeho energii s odpovídajícím podílem energie celého receptu (`energy_matches`). Zapsat se dá nejvýš desetinásobek receptu. Po gramech se loguje jen tehdy, když web uvádí váhu každé suroviny a jejich součet sedí (do 2 %) na váhu receptu; jinak se zápis odmítne a použije se `portions` nebo `percent`. `portions` vyžaduje, aby recept měl počet porcí (`get_meal_details`, nastavit jde přes `update_meal`).
 
 ## Licence
 

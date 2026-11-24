@@ -31,7 +31,8 @@ export function registerPrompts(server: McpServer): void {
           `2. Compare average protein, carbohydrate and fat with their goals from the same result.\n` +
           `3. Call get_nutrient_ranking (nutrient "protein", limit 8) for the same dates and name the main protein sources. If a food has unknown_lines, say its figure is a minimum.\n` +
           `4. Call get_weight_history and describe the weight trend, if there are records in the period.\n` +
-          `5. Finish with three concrete, short observations. Base everything on the numbers returned; if a call fails or a day is missing, say so instead of filling the gap.`,
+          `5. Call get_goal_analysis for the same dates and mention how far each goal was met and what the site's own tips say, and get_hydration if drinking is relevant (a day with 0 litres may only be an unlogged day).\n` +
+          `6. Finish with three concrete, short observations. Base everything on the numbers returned; if a call fails or a day is missing, say so instead of filling the gap.`,
       );
     },
   );
@@ -52,6 +53,7 @@ export function registerPrompts(server: McpServer): void {
           `1. Call get_goals: my goal, target weight, activity level, basal metabolism, energy goal and macro goals. Mention any warnings it returns.\n` +
           `2. Call get_energy_model with weeks ${w}. Read confidence and caveats out loud. If confidence is low or many days are not logged, say that the estimate is unreliable and what would make it better (logging every day, weighing under the same conditions) instead of drawing firm conclusions.\n` +
           `3. Call get_weight_history and, if useful, get_balance_range for the same weeks: how many days were actually logged, average intake against the goal, and whether weekends or single days stand out.\n` +
+          `3b. Call list_tracked_measurements: if waist, hips or body fat % are tracked and moving while the scale is not, say so, because that can mean fat is being lost although the weight stands still. If nothing is tracked, you may suggest starting with one measurement (for example waist) so the next review has more to go on, but do not record anything without asking.\n` +
           `4. Decide which is the most likely cause: the diary is incomplete, intake is above the goal, the real expenditure is lower than the site assumes (difference_from_site), the activity level is set too high, or the period is simply too short to tell.\n` +
           `5. Propose at most one or two concrete changes with numbers (for example a different activity_level, an own_basal or own_target_energy, or a macro adjustment) and explain the effect. Do not suggest an energy goal below my basal metabolism or below 1200 kcal. A large or fast change needs a doctor or dietitian, so say that instead of proposing it.\n` +
           `6. Change nothing yet. Ask me whether to apply the proposal, and call update_goals only after I agree. Afterwards show me the before and after.`,

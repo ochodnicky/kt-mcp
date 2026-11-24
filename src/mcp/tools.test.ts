@@ -3,6 +3,7 @@
  * server and a fake client. Fixture data is synthetic (see kt/diary.test.ts).
  */
 
+import { NO_EXTRA_NUTRIENTS } from '../kt/testkit.js';
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -50,7 +51,7 @@ const day = (date: string, entryCount: number): DiaryDay => ({
               quantity: { raw: '200 g', count: null, label: null, unitSize: null, unitSizeUnit: null, total: 200, totalUnit: 'g' },
               energy: 130,
               energyUnit: 'kcal',
-              nutrients: { protein: 22, carbohydrate: null, fat: 0, fibre: null, sugar: null, saturatedFat: null, salt: null },
+              nutrients: { protein: 22, carbohydrate: null, fat: 0, fibre: null, sugar: null, saturatedFat: null, salt: null, ...NO_EXTRA_NUTRIENTS },
             },
           ]
         : [],
@@ -357,6 +358,8 @@ test('get_meal_details totals only the ingredients with known nutrition and coun
     getMealDetails: async () => ({
       id: 'm1',
       title: 'Test bábovka',
+      totalWeight: 350,
+      portions: 14,
       ingredients: [
         { title: 'mouka', amount: 250, unitTitle: '1 g', weight: 250, nutrition: nutrition(25), error: null },
         { title: 'vejce', amount: 2, unitTitle: 'kus', weight: 100, nutrition: nutrition(null), error: null },
@@ -369,6 +372,7 @@ test('get_meal_details totals only the ingredients with known nutrition and coun
   assert.equal(out.totals_for_whole_recipe.energy, 200);
   assert.equal(out.unknown_ingredients, 1);
   assert.equal(out.ingredients[2].error, 'nope');
+  assert.deepEqual([out.total_weight_g, out.portions], [350, 14]);
   assert.equal(out.ingredients[2].protein, null);
 });
 

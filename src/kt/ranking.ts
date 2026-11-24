@@ -18,6 +18,11 @@ export const RANKABLE_NUTRIENTS = [
   'sugar',
   'saturatedFat',
   'salt',
+  'alcohol',
+  'transFat',
+  'cholesterol',
+  'sodium',
+  'calcium',
 ] as const;
 export type RankableNutrient = (typeof RANKABLE_NUTRIENTS)[number];
 
@@ -59,8 +64,13 @@ export interface NutrientRanking {
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
+/** Entries hold grams; these three are reported in milligrams, as the site shows them. */
+const MILLIGRAM_NUTRIENTS: ReadonlySet<RankableNutrient> = new Set(['cholesterol', 'sodium', 'calcium']);
+
 function valueOf(entry: DiaryEntry, nutrient: RankableNutrient): number | null {
-  return nutrient === 'energy' ? entry.energy : entry.nutrients[nutrient];
+  if (nutrient === 'energy') return entry.energy;
+  const grams = entry.nutrients[nutrient];
+  return grams !== null && MILLIGRAM_NUTRIENTS.has(nutrient) ? grams * 1000 : grams;
 }
 
 export function rankNutrient(outcomes: DayOutcome[], nutrient: RankableNutrient, limit: number): NutrientRanking {
@@ -147,7 +157,7 @@ export function rankNutrient(outcomes: DayOutcome[], nutrient: RankableNutrient,
 
   return {
     nutrient,
-    unit: nutrient === 'energy' ? (unit ?? 'kcal') : 'g',
+    unit: nutrient === 'energy' ? (unit ?? 'kcal') : MILLIGRAM_NUTRIENTS.has(nutrient) ? 'mg' : 'g',
     ranking: known.slice(0, limit),
     omittedFoods: Math.max(0, known.length - limit),
     unknown,
