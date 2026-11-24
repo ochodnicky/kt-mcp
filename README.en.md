@@ -141,6 +141,27 @@ Clients that support MCP prompts offer these as ready-made shortcuts:
 | "My weight is stuck, find out why and suggest changes." | the `plateau_review` prompt → `get_goals` → `get_energy_model` → (after you agree) `update_goals` |
 | "Set carbs to 178 g so it matches the goal." | `get_goals` → `update_goals` |
 | "Change my activity level to lightly active." | `get_goals` → `update_goals` |
+| "How many calories are in 150 g of skyr?" | `search_food` → `get_food_nutrition` |
+| "Find a food by its barcode." | `search_food` (13-digit EAN) |
+| "Log 3 eggs and 80 g of oats for breakfast." | `search_food` → `get_food_portions` → `log_food` |
+| "What have I eaten today so far?" | `get_day_entries` |
+| "What did I eat last week?" | `get_diary_range` (up to 14 days at a time) |
+| "How am I doing against today's protein, carb and fat goals?" | `get_day_balance` |
+| "What do I log most often?" | `list_common_foods` |
+| "Add skyr to my favourites." | `search_food` → `add_favorite_food` |
+| "Remove it from my favourites." | `list_favorite_foods` → `remove_favorite_food` |
+| "Copy all of yesterday to tomorrow." | `copy_day` |
+| "Save this recipe from the photo as a meal." | `search_food` → `create_meal` |
+| "Log my carrot cake for dinner." | `list_my_meals` → `log_meal` |
+| "Delete that saved recipe." | `list_my_meals` → `delete_meal` (after confirmation) |
+| "Delete today's walk." | `get_day_entries` → `delete_activity` |
+| "Delete the note on lunch." | `get_day_entries` → `delete_diary_note` |
+| "How did my weight develop this month, and how far am I from my goal?" | `get_weight_history` |
+| "Estimate from the last six weeks how much I really burn." | `get_energy_model` with `weeks` |
+| "Set macros to 30 % protein, 40 % carbs and 30 % fat." | `get_goals` → `update_goals` (percentages only for all three macros together) |
+| "Remove my own basal and go back to the site's calculation." | `get_goals` → `update_goals` (`null` clears an own value) |
+| "Log my favourite oatmeal for breakfast." | the `log_favorite` prompt |
+| "Show the raw daily totals and weekly charts as the site sends them." | `get_day_summary` |
 
 ### How writes are guarded
 
